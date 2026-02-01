@@ -37,7 +37,7 @@ export default function DashboardPage() {
   // Safe redirect
   useEffect(() => {
     if (!authLoading && !user) {
-      router.push('/login');
+      router.push('/');
     }
   }, [user, authLoading, router]);
 

@@ -28,7 +28,7 @@ export default function TransactionsPage() {
   // ✅ Safe redirect using useEffect
   useEffect(() => {
     if (!authLoading && !user) {
-      router.push('/login');
+      router.push('/');
     }
   }, [user, authLoading, router]);
 

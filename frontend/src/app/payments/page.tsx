@@ -41,75 +41,12 @@ export default function PaymentsPage() {
   const { user, loading: authLoading } = useAuth();
   const router = useRouter();
 
-  // Auth guard
+  // Auth guard — only runs on client
   useEffect(() => {
     if (!authLoading && !user) {
       router.push('/');
     }
   }, [user, authLoading, router]);
-
-  // Handle Paystack return (safe for SSR)
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-
-    const urlParams = new URLSearchParams(window.location.search);
-    const reference = urlParams.get('reference');
-
-    if (!reference) return;
-
-    // Clean URL
-    router.replace('/payments', { scroll: false });
-
-    // Start verification
-    setPollingStatus('PROCESSING');
-    setError(null);
-    setSuccessMessage(null);
-
-    const verify = async () => {
-      let attempts = 0;
-      const max = 6;
-      const poll = async () => {
-        try {
-          const res = await fetch(`/api/transactions/paystack/verify/${reference}/`, {
-            credentials: 'include',
-          });
-          if (!res.ok) {
-            if (attempts < max) {
-              attempts++;
-              setTimeout(poll, 2000);
-            } else {
-              setError('Payment verification delayed. You’ll be notified when confirmed.');
-              setPollingStatus(null);
-            }
-            return;
-          }
-
-          const data = await res.json();
-          if (data.status === 'COMPLETED') {
-            setShowConfirmation(true);
-          } else if (['FAILED', 'CANCELLED'].includes(data.status)) {
-            setShowFailure(true);
-          } else if (attempts < max) {
-            attempts++;
-            setTimeout(poll, 2000);
-            return;
-          }
-          setPollingStatus(null);
-        } catch (err) {
-          if (attempts < max) {
-            attempts++;
-            setTimeout(poll, 2000);
-          } else {
-            setError('Failed to verify payment. Please contact support.');
-            setPollingStatus(null);
-          }
-        }
-      };
-      poll();
-    };
-
-    verify();
-  }, [router]);
 
   // Form state
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('STK_PUSH');
@@ -118,6 +55,8 @@ export default function PaymentsPage() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
+  // Polling & modal state
   const [activeTransactionId, setActiveTransactionId] = useState<number | null>(null);
   const [pollingStatus, setPollingStatus] = useState<TransactionStatus | null>(null);
   const [showConfirmation, setShowConfirmation] = useState(false);
@@ -125,16 +64,20 @@ export default function PaymentsPage() {
 
   const isMpesa = paymentMethod === 'STK_PUSH';
 
-  // MPesa polling
+  // 🔁 POLLING FOR MPESA OR ACTIVE TRANSACTION
   useEffect(() => {
     if (!activeTransactionId) return;
 
-    const poll = async () => {
+    const pollStatus = async () => {
       try {
         const res = await fetch(`/api/transactions/${activeTransactionId}/`, {
           credentials: 'include',
         });
-        if (!res.ok) return;
+
+        if (!res.ok) {
+          console.error('Failed to fetch transaction status');
+          return;
+        }
 
         const transactionData: TransactionResponse = await res.json();
         setPollingStatus(transactionData.status);
@@ -151,13 +94,78 @@ export default function PaymentsPage() {
       }
     };
 
-    poll();
-    const interval = setInterval(poll, 3000);
+    pollStatus();
+    const interval = setInterval(pollStatus, 3000);
     return () => clearInterval(interval);
   }, [activeTransactionId]);
 
+  // ✅ HANDLE PAYSTACK RETURN (using window.location — safe for prerender)
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const urlParams = new URLSearchParams(window.location.search);
+    const reference = urlParams.get('reference');
+
+    if (!reference) return;
+
+    // Clear query params immediately
+    router.replace('/payments', { scroll: false });
+
+    // Start verification flow
+    setPollingStatus('PROCESSING');
+    setError(null);
+    setSuccessMessage(null);
+
+    const verifyPayment = async () => {
+      const checkStatus = async (): Promise<boolean> => {
+        try {
+          const res = await fetch(`/api/transactions/paystack/verify/${reference}/`, {
+            credentials: 'include',
+          });
+
+          if (!res.ok) {
+            return false;
+          }
+
+          const data = await res.json();
+          if (data.status === 'COMPLETED') {
+            setShowConfirmation(true);
+            return true;
+          } else if (['FAILED', 'CANCELLED'].includes(data.status)) {
+            setShowFailure(true);
+            return true;
+          }
+          return false;
+        } catch (err) {
+          console.error('Verification check failed:', err);
+          return false;
+        }
+      };
+
+      let attempts = 0;
+      const maxAttempts = 6;
+      const poll = async () => {
+        const done = await checkStatus();
+        if (!done && attempts < maxAttempts) {
+          attempts++;
+          setTimeout(poll, 2000);
+        } else if (!done) {
+          setError(
+            'Payment verification is taking longer than expected. You’ll receive a confirmation email once complete.'
+          );
+          setPollingStatus(null);
+        }
+      };
+
+      poll();
+    };
+
+    verifyPayment();
+  }, [router]); // Only depends on router
+
   const validateInputs = () => {
     setError(null);
+
     const amountNum = parseFloat(amount);
     if (!amount || isNaN(amountNum) || amountNum <= 0) {
       setError('Please enter a valid amount');
@@ -176,6 +184,7 @@ export default function PaymentsPage() {
         return false;
       }
     }
+
     return true;
   };
 
@@ -189,7 +198,9 @@ export default function PaymentsPage() {
 
     try {
       const csrfToken = getCSRFToken();
-      if (!csrfToken) throw new Error('CSRF token missing. Refresh the page.');
+      if (!csrfToken) {
+        throw new Error('CSRF token missing. Please refresh the page.');
+      }
 
       const res = await fetch(api.transactions.initiate, {
         method: 'POST',
@@ -209,10 +220,8 @@ export default function PaymentsPage() {
 
       if (res.ok) {
         if (paymentMethod === 'PAYSTACK' && data.checkout_url) {
-          // Redirect to Paystack (user leaves site temporarily)
           window.location.href = data.checkout_url;
         } else if (data.id) {
-          // For MPesa: stay on page and poll
           setActiveTransactionId(data.id);
           setSuccessMessage('Payment request sent! Please check your phone to complete.');
           setAmount('');
@@ -223,6 +232,7 @@ export default function PaymentsPage() {
         setError(data.error || 'Failed to initiate payment. Please try again.');
       }
     } catch (err: any) {
+      console.error('Payment error:', err);
       setError(err.message || 'Network error. Please check your connection.');
     } finally {
       setIsSubmitting(false);
@@ -235,6 +245,7 @@ export default function PaymentsPage() {
     router.push('/dashboard');
   };
 
+  // Show loader while auth is resolving
   if (authLoading || !user) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#fdf5e6]">
@@ -245,7 +256,7 @@ export default function PaymentsPage() {
 
   return (
     <DashboardLayout user={user}>
-      {/* Modals */}
+      {/* Confirmation Modal */}
       {showConfirmation && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
           <div className="bg-white rounded-3xl p-8 max-w-sm w-full text-center shadow-2xl border border-[#003c25]/10 animate-pop-in">
@@ -253,14 +264,20 @@ export default function PaymentsPage() {
               <CheckCircle className="w-10 h-10 text-green-600" />
             </div>
             <h2 className="text-2xl font-bold text-[#003c25] mb-2">Payment Confirmed!</h2>
-            <p className="text-[#003c25]/80 mb-6">Thank you! Your payment has been successfully processed.</p>
-            <button onClick={resetFlow} className="w-full bg-[#003c25] hover:bg-[#002f1d] text-[#fdf5e6] font-semibold py-3 px-4 rounded-xl transition transform hover:scale-[1.02]">
+            <p className="text-[#003c25]/80 mb-6">
+              Thank you! Your payment has been successfully processed.
+            </p>
+            <button
+              onClick={resetFlow}
+              className="w-full bg-[#003c25] hover:bg-[#002f1d] text-[#fdf5e6] font-semibold py-3 px-4 rounded-xl transition transform hover:scale-[1.02]"
+            >
               Go to Dashboard
             </button>
           </div>
         </div>
       )}
 
+      {/* Failure Modal */}
       {showFailure && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
           <div className="bg-white rounded-3xl p-8 max-w-sm w-full text-center shadow-2xl border border-red-200 animate-pop-in">
@@ -268,8 +285,13 @@ export default function PaymentsPage() {
               <XCircle className="w-10 h-10 text-red-600" />
             </div>
             <h2 className="text-2xl font-bold text-[#003c25] mb-2">Payment Failed</h2>
-            <p className="text-[#003c25]/80 mb-6">The payment was not completed. Please try again or contact support.</p>
-            <button onClick={resetFlow} className="w-full bg-[#cc5500] hover:bg-[#b84a00] text-[#fdf5e6] font-semibold py-3 px-4 rounded-xl transition flex items-center justify-center gap-2">
+            <p className="text-[#003c25]/80 mb-6">
+              The payment was not completed. Please try again or contact support.
+            </p>
+            <button
+              onClick={resetFlow}
+              className="w-full bg-[#cc5500] hover:bg-[#b84a00] text-[#fdf5e6] font-semibold py-3 px-4 rounded-xl transition flex items-center justify-center gap-2"
+            >
               <RotateCcw className="w-4 h-4" />
               Try Again
             </button>
@@ -279,7 +301,10 @@ export default function PaymentsPage() {
 
       <div className="p-4 lg:p-6 max-w-2xl mx-auto">
         <div className="mb-6">
-          <button onClick={() => router.back()} className="flex items-center gap-2 text-[#003c25] hover:text-[#cc5500] transition mb-4">
+          <button
+            onClick={() => router.back()}
+            className="flex items-center gap-2 text-[#003c25] hover:text-[#cc5500] transition mb-4"
+          >
             <ArrowLeft className="w-4 h-4" />
             Back
           </button>
@@ -288,7 +313,37 @@ export default function PaymentsPage() {
         </div>
 
         <div className="bg-white rounded-2xl shadow-sm border border-[#003c25]/10 p-6">
-          {/* Verification banner (for Paystack return) */}
+          {/* ✅ RESTORED: Method Toggle */}
+          <div className="flex gap-2 mb-6">
+            <button
+              type="button"
+              onClick={() => setPaymentMethod('STK_PUSH')}
+              disabled={!!activeTransactionId || pollingStatus === 'PROCESSING'}
+              className={`flex-1 flex items-center justify-center gap-2 py-3 px-4 rounded-xl transition ${
+                isMpesa
+                  ? 'bg-[#003c25] text-[#fdf5e6]'
+                  : 'bg-[#fdf5e6] text-[#003c25] hover:bg-[#003c25]/5'
+              } ${activeTransactionId || pollingStatus === 'PROCESSING' ? 'opacity-60 cursor-not-allowed' : ''}`}
+            >
+              <Smartphone className="w-5 h-5" />
+              MPesa (STK Push)
+            </button>
+            <button
+              type="button"
+              onClick={() => setPaymentMethod('PAYSTACK')}
+              disabled={!!activeTransactionId || pollingStatus === 'PROCESSING'}
+              className={`flex-1 flex items-center justify-center gap-2 py-3 px-4 rounded-xl transition ${
+                !isMpesa
+                  ? 'bg-[#003c25] text-[#fdf5e6]'
+                  : 'bg-[#fdf5e6] text-[#003c25] hover:bg-[#003c25]/5'
+              } ${activeTransactionId || pollingStatus === 'PROCESSING' ? 'opacity-60 cursor-not-allowed' : ''}`}
+            >
+              <CreditCard className="w-5 h-5" />
+              Paystack (Card/Bank)
+            </button>
+          </div>
+
+          {/* Verification Status Banner (for Paystack return) */}
           {pollingStatus === 'PROCESSING' && (
             <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-xl flex items-center gap-3 animate-fade-in">
               <Loader2 className="w-5 h-5 animate-spin text-blue-600" />
@@ -296,6 +351,7 @@ export default function PaymentsPage() {
             </div>
           )}
 
+          {/* Success Banner */}
           {successMessage && (
             <div className="mb-6 p-4 bg-green-50 border border-green-200 rounded-xl flex items-start gap-3 animate-fade-in">
               <CheckCircle className="w-5 h-5 text-green-600 mt-0.5 flex-shrink-0" />
@@ -303,27 +359,31 @@ export default function PaymentsPage() {
             </div>
           )}
 
+          {/* Error Banner */}
           {error && (
             <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl text-red-700 animate-fade-in">
               {error}
             </div>
           )}
 
-          {/* MPesa polling indicator */}
+          {/* Polling Status Indicator (for MPesa) */}
           {activeTransactionId && pollingStatus !== 'PROCESSING' && (
             <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-xl flex items-center gap-3 animate-fade-in">
               <Loader2 className="w-5 h-5 animate-spin text-blue-600" />
               <span className="text-blue-800">
-                Awaiting MPesa confirmation...
+                Awaiting payment confirmation...
                 <br />
                 <span className="text-xs text-blue-600">Do not close this page</span>
               </span>
             </div>
           )}
 
+          {/* Payment Form */}
           <form onSubmit={handleSubmit} className="space-y-6">
             <div>
-              <label htmlFor="amount" className="block text-sm font-medium text-[#003c25] mb-2">Amount (KES)</label>
+              <label htmlFor="amount" className="block text-sm font-medium text-[#003c25] mb-2">
+                Amount (KES)
+              </label>
               <input
                 id="amount"
                 type="number"
@@ -371,7 +431,7 @@ export default function PaymentsPage() {
             <button
               type="submit"
               disabled={isSubmitting || !!activeTransactionId || pollingStatus === 'PROCESSING'}
-              className="w-full bg-[#003c25] hover:bg-[#002f1d] text-[#fdf5e6] font-semibold py-3.5 px-4 rounded-xl transition flex items-center justify-center gap-2 disabled:opacity-70 disabled:cursor-not-allowed transform hover:scale-[1.02]"
+              className="w-full bg-[#003c25] hover:bg-[#002f1d] text-[#fdf5e6] font-semibold py-3.5 px-4 rounded-xl transition flex items-center justify-center gap-2 disabled:opacity-70 disabled:cursor-not-allowed transform hover:scale-[1.02] active:scale-[1.00]"
             >
               {isSubmitting ? (
                 <>
@@ -389,10 +449,20 @@ export default function PaymentsPage() {
       </div>
 
       <style jsx global>{`
-        @keyframes pop-in { 0% { opacity: 0; transform: scale(0.9); } 100% { opacity: 1; transform: scale(1); } }
-        @keyframes fade-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
-        .animate-pop-in { animation: pop-in 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards; }
-        .animate-fade-in { animation: fade-in 0.3s ease-out; }
+        @keyframes pop-in {
+          0% { opacity: 0; transform: scale(0.9); }
+          100% { opacity: 1; transform: scale(1); }
+        }
+        @keyframes fade-in {
+          from { opacity: 0; transform: translateY(-4px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-pop-in {
+          animation: pop-in 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+        }
+        .animate-fade-in {
+          animation: fade-in 0.3s ease-out;
+        }
       `}</style>
     </DashboardLayout>
   );

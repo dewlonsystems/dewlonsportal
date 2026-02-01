@@ -1,4 +1,6 @@
 // src/components/layout/Sidebar.tsx
+'use client';
+
 import Link from 'next/link';
 import { User } from '@/context/AuthContext';
 import { 
@@ -24,7 +26,8 @@ export default function Sidebar({ user }: SidebarProps) {
   ];
 
   const handleLinkClick = () => {
-    if (window.innerWidth < 1024) {
+    // ✅ Safe window access: only runs on client
+    if (typeof window !== 'undefined' && window.innerWidth < 1024) {
       closeSidebar();
     }
   };

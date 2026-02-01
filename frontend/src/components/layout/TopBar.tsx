@@ -1,8 +1,10 @@
 // src/components/layout/TopBar.tsx
+'use client';
+
 import { User } from '@/context/AuthContext';
 import { LogOut, Menu } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
-import { useSidebar } from './SidebarContext'; // We'll create this
+import { useSidebar } from './SidebarContext';
 
 interface TopBarProps {
   user: User;

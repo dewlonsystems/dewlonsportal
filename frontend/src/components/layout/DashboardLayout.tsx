@@ -16,17 +16,18 @@ export default function DashboardLayout({
   return (
     <SidebarProvider>
       <div className="flex min-h-screen bg-secondary">
-        {/* Fixed Sidebar */}
+        {/* Sidebar is always rendered, but behaves differently on mobile vs desktop */}
         <Sidebar user={user} />
-        
-        {/* Main Content */}
-        <div className="flex flex-col flex-1 lg:ml-64 ml-0 w-full">
-          <div className="sticky top-0 z-10">
+
+        {/* Main Content Area */}
+        <div className="flex flex-col flex-1 lg:ml-64 w-full">
+          {/* Sticky TopBar */}
+          <div className="sticky top-0 z-10 bg-secondary">
             <TopBar user={user} />
           </div>
-          <main className="flex-1 overflow-auto p-4 lg:p-6 min-h-0">
-            {children}
-          </main>
+
+          {/* Page Content */}
+          <main className="flex-1 p-4 lg:p-6">{children}</main>
         </div>
       </div>
     </SidebarProvider>

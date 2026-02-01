@@ -24,14 +24,14 @@ export default function Sidebar({ user }: SidebarProps) {
   ];
 
   const handleLinkClick = () => {
-    if (window.innerWidth < 1024) { // lg breakpoint
+    if (window.innerWidth < 1024) {
       closeSidebar();
     }
   };
 
   return (
     <>
-      {/* Overlay for mobile */}
+      {/* Mobile overlay */}
       {isSidebarOpen && (
         <div 
           className="fixed inset-0 z-20 bg-black/40 lg:hidden"
@@ -39,12 +39,13 @@ export default function Sidebar({ user }: SidebarProps) {
         />
       )}
 
-      {/* Sidebar */}
+      {/* Sidebar panel */}
       <div
-        className={`fixed lg:static z-30 w-64 h-screen bg-white border-r border-primary/10 transform transition-transform duration-300 ease-in-out ${
+        className={`fixed left-0 top-0 z-30 w-64 h-screen bg-white border-r border-primary/10 transform transition-transform duration-300 ease-in-out ${
           isSidebarOpen ? 'translate-x-0' : '-translate-x-full'
         } lg:translate-x-0`}
       >
+        {/* Logo/Header */}
         <div className="p-4 border-b border-primary/10">
           <div className="flex items-center gap-2">
             <div className="w-8 h-8 bg-primary rounded-lg flex items-center justify-center">
@@ -54,6 +55,7 @@ export default function Sidebar({ user }: SidebarProps) {
           </div>
         </div>
 
+        {/* Navigation */}
         <nav className="p-4 h-[calc(100vh-73px)] overflow-y-auto">
           <ul className="space-y-1">
             {navItems.map((item) => {

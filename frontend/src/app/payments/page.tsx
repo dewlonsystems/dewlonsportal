@@ -1,9 +1,9 @@
 // src/app/payments/page.tsx
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useRouter } from 'next/navigation';
 import {
   Loader2,
   Smartphone,
@@ -40,9 +40,8 @@ const getCSRFToken = (): string | null => {
 export default function PaymentsPage() {
   const { user, loading: authLoading } = useAuth();
   const router = useRouter();
-  const searchParams = useSearchParams();
 
-  // Auth guard
+  // Auth guard — only runs on client
   useEffect(() => {
     if (!authLoading && !user) {
       router.push('/');
@@ -100,11 +99,13 @@ export default function PaymentsPage() {
     return () => clearInterval(interval);
   }, [activeTransactionId]);
 
-  // ✅ HANDLE PAYSTACK RETURN (via ?reference=)
+  // ✅ HANDLE PAYSTACK RETURN (using window.location — safe for prerender)
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
-    const reference = searchParams.get('reference');
+    const urlParams = new URLSearchParams(window.location.search);
+    const reference = urlParams.get('reference');
+
     if (!reference) return;
 
     // Clear query params immediately
@@ -123,7 +124,6 @@ export default function PaymentsPage() {
           });
 
           if (!res.ok) {
-            // Transaction not found or access denied
             return false;
           }
 
@@ -142,7 +142,6 @@ export default function PaymentsPage() {
         }
       };
 
-      // Try up to 6 times (12 seconds total)
       let attempts = 0;
       const maxAttempts = 6;
       const poll = async () => {
@@ -151,7 +150,6 @@ export default function PaymentsPage() {
           attempts++;
           setTimeout(poll, 2000);
         } else if (!done) {
-          // Timeout — assume webhook will update later
           setError(
             'Payment verification is taking longer than expected. You’ll receive a confirmation email once complete.'
           );
@@ -163,7 +161,7 @@ export default function PaymentsPage() {
     };
 
     verifyPayment();
-  }, [searchParams, router]);
+  }, [router]); // Only depends on router
 
   const validateInputs = () => {
     setError(null);
@@ -222,7 +220,7 @@ export default function PaymentsPage() {
 
       if (res.ok) {
         if (paymentMethod === 'PAYSTACK' && data.checkout_url) {
-          window.location.href = data.checkout_url; // Redirect to Paystack
+          window.location.href = data.checkout_url;
         } else if (data.id) {
           setActiveTransactionId(data.id);
           setSuccessMessage('Payment request sent! Please check your phone to complete.');
@@ -247,6 +245,7 @@ export default function PaymentsPage() {
     router.push('/dashboard');
   };
 
+  // Show loader while auth is resolving
   if (authLoading || !user) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#fdf5e6]">

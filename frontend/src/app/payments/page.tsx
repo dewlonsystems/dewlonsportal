@@ -1,38 +1,113 @@
-// src/app/payments/page.tsx
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { useRouter } from 'next/navigation';
-import { Loader2, Smartphone, CreditCard, ArrowLeft, CheckCircle } from 'lucide-react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import {
+  Loader2,
+  Smartphone,
+  CreditCard,
+  ArrowLeft,
+  CheckCircle,
+  XCircle,
+  RotateCcw,
+} from 'lucide-react';
 import { api } from '@/lib/api';
-import DashboardLayout from '@/components/layout/DashboardLayout'; // ✅ IMPORT LAYOUT
+import DashboardLayout from '@/components/layout/DashboardLayout';
 
 type PaymentMethod = 'STK_PUSH' | 'PAYSTACK';
+type TransactionStatus = 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
+
+interface TransactionResponse {
+  id: number;
+  status: TransactionStatus;
+  amount: string;
+  payment_method: string;
+  customer_identifier: string;
+}
 
 export default function PaymentsPage() {
   const { user, loading: authLoading } = useAuth();
   const router = useRouter();
+  const searchParams = useSearchParams();
 
-  // ✅ Safe redirect using useEffect
+  // Auth guard
   useEffect(() => {
     if (!authLoading && !user) {
       router.push('/');
     }
   }, [user, authLoading, router]);
 
+  // Form state
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('STK_PUSH');
   const [amount, setAmount] = useState<string>('');
   const [identifier, setIdentifier] = useState<string>('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<{ message: string; checkoutUrl?: string } | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
+  // Polling & modal state
+  const [activeTransactionId, setActiveTransactionId] = useState<number | null>(null);
+  const [pollingStatus, setPollingStatus] = useState<TransactionStatus | null>(null);
+  const [showConfirmation, setShowConfirmation] = useState(false);
+  const [showFailure, setShowFailure] = useState(false);
 
   const isMpesa = paymentMethod === 'STK_PUSH';
 
+  // Handle Paystack return (if redirected back with reference)
+  useEffect(() => {
+    const reference = searchParams.get('reference');
+    if (reference) {
+      // Clear URL to avoid re-trigger
+      router.replace('/payments', { scroll: false });
+      // In a real app, you'd fetch by reference — but we rely on polling via ID
+      // So this is just a fallback; main flow uses transaction ID
+    }
+  }, [searchParams, router]);
+
+  // 🔄 POLLING EFFECT
+  useEffect(() => {
+    if (!activeTransactionId) return;
+
+    const pollStatus = async () => {
+      try {
+        const res = await fetch(`/api/transactions/${activeTransactionId}/`, {
+          credentials: 'include',
+        });
+
+        if (!res.ok) {
+          console.error('Failed to fetch transaction status');
+          return;
+        }
+
+        const data: TransactionResponse = await res.json();
+        setPollingStatus(data.status);
+
+        if (data.status === 'COMPLETED') {
+          setShowConfirmation(true);
+          setActiveTransactionId(null);
+        } else if (data.status === 'FAILED') {
+          setShowFailure(true);
+          setActiveTransactionId(null);
+        }
+        // Continue polling if PENDING/PROCESSING
+      } catch (err) {
+        console.error('Polling error:', err);
+      }
+    };
+
+    // Initial poll immediately
+    pollStatus();
+
+    // Then poll every 3 seconds
+    const interval = setInterval(pollStatus, 3000);
+
+    return () => clearInterval(interval);
+  }, [activeTransactionId]);
+
   const validateInputs = () => {
     setError(null);
-    
+
     const amountNum = parseFloat(amount);
     if (!amount || isNaN(amountNum) || amountNum <= 0) {
       setError('Please enter a valid amount');
@@ -62,10 +137,9 @@ export default function PaymentsPage() {
 
     setIsSubmitting(true);
     setError(null);
-    setSuccess(null);
+    setSuccessMessage(null);
 
     try {
-      await fetch(api.auth.user, { credentials: 'include' });
       const csrfCookie = document.cookie
         .split('; ')
         .find(row => row.startsWith('csrftoken='))?.split('=')[1];
@@ -91,15 +165,13 @@ export default function PaymentsPage() {
       if (res.ok) {
         if (paymentMethod === 'PAYSTACK' && data.checkout_url) {
           window.location.href = data.checkout_url;
-        } else {
-          setSuccess({
-            message: 'Payment request sent! Please check your phone to complete.',
-          });
-          setTimeout(() => {
-            setAmount('');
-            setIdentifier('');
-            setSuccess(null);
-          }, 3000);
+        } else if (data.id) {
+          // MPesa: start polling
+          setActiveTransactionId(data.id);
+          setSuccessMessage('Payment request sent! Please check your phone to complete.');
+          setAmount('');
+          setIdentifier('');
+          setTimeout(() => setSuccessMessage(null), 4000);
         }
       } else {
         setError(data.error || 'Failed to initiate payment. Please try again.');
@@ -112,41 +184,91 @@ export default function PaymentsPage() {
     }
   };
 
+  // Reset flow
+  const resetFlow = () => {
+    setShowConfirmation(false);
+    setShowFailure(false);
+    router.push('/dashboard');
+  };
+
   if (authLoading || !user) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-secondary">
-        <Loader2 className="w-8 h-8 animate-spin text-primary" />
+      <div className="min-h-screen flex items-center justify-center bg-[#fdf5e6]">
+        <Loader2 className="w-8 h-8 animate-spin text-[#003c25]" />
       </div>
     );
   }
 
-  // ✅ WRAP ENTIRE PAGE CONTENT IN DASHBOARD LAYOUT
   return (
     <DashboardLayout user={user}>
+      {/* Confirmation Modal */}
+      {showConfirmation && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+          <div className="bg-white rounded-3xl p-8 max-w-sm w-full text-center shadow-2xl border border-[#003c25]/10 animate-pop-in">
+            <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-5">
+              <CheckCircle className="w-10 h-10 text-green-600" />
+            </div>
+            <h2 className="text-2xl font-bold text-[#003c25] mb-2">Payment Confirmed!</h2>
+            <p className="text-[#003c25]/80 mb-6">
+              Thank you! Your payment has been successfully processed.
+            </p>
+            <button
+              onClick={resetFlow}
+              className="w-full bg-[#003c25] hover:bg-[#002f1d] text-[#fdf5e6] font-semibold py-3 px-4 rounded-xl transition transform hover:scale-[1.02]"
+            >
+              Go to Dashboard
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Failure Modal */}
+      {showFailure && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+          <div className="bg-white rounded-3xl p-8 max-w-sm w-full text-center shadow-2xl border border-red-200 animate-pop-in">
+            <div className="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-5">
+              <XCircle className="w-10 h-10 text-red-600" />
+            </div>
+            <h2 className="text-2xl font-bold text-[#003c25] mb-2">Payment Failed</h2>
+            <p className="text-[#003c25]/80 mb-6">
+              The payment was not completed. Please try again or contact support.
+            </p>
+            <button
+              onClick={resetFlow}
+              className="w-full bg-[#cc5500] hover:bg-[#b84a00] text-[#fdf5e6] font-semibold py-3 px-4 rounded-xl transition flex items-center justify-center gap-2"
+            >
+              <RotateCcw className="w-4 h-4" />
+              Try Again
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="p-4 lg:p-6 max-w-2xl mx-auto">
         <div className="mb-6">
           <button
             onClick={() => router.back()}
-            className="flex items-center gap-2 text-primary hover:text-accent transition mb-4"
+            className="flex items-center gap-2 text-[#003c25] hover:text-[#cc5500] transition mb-4"
           >
             <ArrowLeft className="w-4 h-4" />
             Back
           </button>
-          <h1 className="text-2xl font-bold text-primary">Initiate Payment</h1>
-          <p className="text-primary/70">Collect payment via MPesa or card</p>
+          <h1 className="text-2xl font-bold text-[#003c25]">Initiate Payment</h1>
+          <p className="text-[#003c25]/70">Collect payment via MPesa or card securely</p>
         </div>
 
-        <div className="bg-white rounded-2xl shadow-sm border border-primary/10 p-6">
+        <div className="bg-white rounded-2xl shadow-sm border border-[#003c25]/10 p-6">
           {/* Method Toggle */}
           <div className="flex gap-2 mb-6">
             <button
               type="button"
               onClick={() => setPaymentMethod('STK_PUSH')}
-              className={`flex-1 flex items-center justify-center gap-2 py-3 px-4 rounded-lg transition ${
+              disabled={!!activeTransactionId}
+              className={`flex-1 flex items-center justify-center gap-2 py-3 px-4 rounded-xl transition ${
                 isMpesa
-                  ? 'bg-primary text-secondary'
-                  : 'bg-secondary text-primary hover:bg-primary/5'
-              }`}
+                  ? 'bg-[#003c25] text-[#fdf5e6]'
+                  : 'bg-[#fdf5e6] text-[#003c25] hover:bg-[#003c25]/5'
+              } ${activeTransactionId ? 'opacity-60 cursor-not-allowed' : ''}`}
             >
               <Smartphone className="w-5 h-5" />
               MPesa (STK Push)
@@ -154,38 +276,49 @@ export default function PaymentsPage() {
             <button
               type="button"
               onClick={() => setPaymentMethod('PAYSTACK')}
-              className={`flex-1 flex items-center justify-center gap-2 py-3 px-4 rounded-lg transition ${
+              disabled={!!activeTransactionId}
+              className={`flex-1 flex items-center justify-center gap-2 py-3 px-4 rounded-xl transition ${
                 !isMpesa
-                  ? 'bg-primary text-secondary'
-                  : 'bg-secondary text-primary hover:bg-primary/5'
-              }`}
+                  ? 'bg-[#003c25] text-[#fdf5e6]'
+                  : 'bg-[#fdf5e6] text-[#003c25] hover:bg-[#003c25]/5'
+              } ${activeTransactionId ? 'opacity-60 cursor-not-allowed' : ''}`}
             >
               <CreditCard className="w-5 h-5" />
               Paystack (Card/Bank)
             </button>
           </div>
 
-          {/* Success Message */}
-          {success && (
-            <div className="mb-6 p-4 bg-green-50 border border-green-200 rounded-lg flex items-start gap-3">
-              <CheckCircle className="w-5 h-5 text-green-600 mt-0.5" />
-              <div>
-                <p className="text-green-800 font-medium">{success.message}</p>
-              </div>
+          {/* Success Banner */}
+          {successMessage && (
+            <div className="mb-6 p-4 bg-green-50 border border-green-200 rounded-xl flex items-start gap-3 animate-fade-in">
+              <CheckCircle className="w-5 h-5 text-green-600 mt-0.5 flex-shrink-0" />
+              <p className="text-green-800">{successMessage}</p>
             </div>
           )}
 
-          {/* Error Message */}
+          {/* Error Banner */}
           {error && (
-            <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
+            <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-xl text-red-700 animate-fade-in">
               {error}
+            </div>
+          )}
+
+          {/* Polling Status Indicator */}
+          {activeTransactionId && (
+            <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-xl flex items-center gap-3 animate-fade-in">
+              <Loader2 className="w-5 h-5 animate-spin text-blue-600" />
+              <span className="text-blue-800">
+                Awaiting payment confirmation...
+                <br />
+                <span className="text-xs text-blue-600">Do not close this page</span>
+              </span>
             </div>
           )}
 
           {/* Payment Form */}
           <form onSubmit={handleSubmit} className="space-y-6">
             <div>
-              <label htmlFor="amount" className="block text-sm font-medium text-primary mb-2">
+              <label htmlFor="amount" className="block text-sm font-medium text-[#003c25] mb-2">
                 Amount (KES)
               </label>
               <input
@@ -195,14 +328,15 @@ export default function PaymentsPage() {
                 step="0.01"
                 value={amount}
                 onChange={(e) => setAmount(e.target.value)}
-                className="w-full px-4 py-3 bg-secondary border border-primary/20 rounded-lg focus:ring-2 focus:ring-accent focus:border-transparent outline-none transition"
+                disabled={isSubmitting || !!activeTransactionId}
+                className="w-full px-4 py-3.5 bg-[#fdf5e6] border border-[#003c25]/20 rounded-xl focus:ring-2 focus:ring-[#cc5500] focus:border-transparent outline-none transition"
                 placeholder="e.g., 500"
                 required
               />
             </div>
 
             <div>
-              <label htmlFor="identifier" className="block text-sm font-medium text-primary mb-2">
+              <label htmlFor="identifier" className="block text-sm font-medium text-[#003c25] mb-2">
                 {isMpesa ? 'Phone Number' : 'Email Address'}
               </label>
               <input
@@ -210,36 +344,55 @@ export default function PaymentsPage() {
                 type={isMpesa ? 'tel' : 'email'}
                 value={identifier}
                 onChange={(e) => setIdentifier(e.target.value)}
-                className="w-full px-4 py-3 bg-secondary border border-primary/20 rounded-lg focus:ring-2 focus:ring-accent focus:border-transparent outline-none transition"
+                disabled={isSubmitting || !!activeTransactionId}
+                className="w-full px-4 py-3.5 bg-[#fdf5e6] border border-[#003c25]/20 rounded-xl focus:ring-2 focus:ring-[#cc5500] focus:border-transparent outline-none transition"
                 placeholder={isMpesa ? '0712345678' : 'customer@example.com'}
                 required
               />
-              <p className="mt-1 text-xs text-primary/60">
+              <p className="mt-1.5 text-xs text-[#003c25]/60">
                 {isMpesa
                   ? 'Enter a valid Kenyan mobile number'
-                  : 'Customer will receive payment link via email'}
+                  : 'Customer will receive a secure payment link'}
               </p>
             </div>
 
             <button
               type="submit"
-              disabled={isSubmitting}
-              className="w-full bg-primary hover:bg-primary/90 text-secondary font-semibold py-3 px-4 rounded-lg transition flex items-center justify-center gap-2 disabled:opacity-70"
+              disabled={isSubmitting || !!activeTransactionId}
+              className="w-full bg-[#003c25] hover:bg-[#002f1d] text-[#fdf5e6] font-semibold py-3.5 px-4 rounded-xl transition flex items-center justify-center gap-2 disabled:opacity-70 disabled:cursor-not-allowed transform hover:scale-[1.02] active:scale-[1.00]"
             >
               {isSubmitting ? (
                 <>
                   <Loader2 className="w-5 h-5 animate-spin" />
                   Processing...
                 </>
+              ) : isMpesa ? (
+                'Send STK Push'
               ) : (
-                <>
-                  {isMpesa ? 'Send STK Push' : 'Create Payment Link'}
-                </>
+                'Create Payment Link'
               )}
             </button>
           </form>
         </div>
       </div>
+
+      {/* Global Animations */}
+      <style jsx global>{`
+        @keyframes pop-in {
+          0% { opacity: 0; transform: scale(0.9); }
+          100% { opacity: 1; transform: scale(1); }
+        }
+        @keyframes fade-in {
+          from { opacity: 0; transform: translateY(-4px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-pop-in {
+          animation: pop-in 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+        }
+        .animate-fade-in {
+          animation: fade-in 0.3s ease-out;
+        }
+      `}</style>
     </DashboardLayout>
   );
 }

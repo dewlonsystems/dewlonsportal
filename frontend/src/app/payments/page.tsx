@@ -1,12 +1,9 @@
 // src/app/payments/page.tsx
 'use client';
 
-export const dynamic = 'force-dynamic';
-export const fetchCache = 'force-no-store';
-
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useRouter } from 'next/navigation';
 import {
   Loader2,
   Smartphone,
@@ -44,7 +41,6 @@ const getCSRFToken = (): string | null => {
 export default function PaymentsPage() {
   const { user, loading: authLoading } = useAuth();
   const router = useRouter();
-  const searchParams = useSearchParams();
 
   // Auth guard — only runs on client
   useEffect(() => {
@@ -52,6 +48,19 @@ export default function PaymentsPage() {
       router.push('/');
     }
   }, [user, authLoading, router]);
+
+  // Handle Paystack return using window.location (safe)
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const urlParams = new URLSearchParams(window.location.search);
+    const reference = urlParams.get('reference');
+
+    if (reference) {
+      // Clear query param without page reload
+      router.replace('/payments', { scroll: false });
+    }
+  }, [router]);
 
   // Form state
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('STK_PUSH');
@@ -68,14 +77,6 @@ export default function PaymentsPage() {
   const [showFailure, setShowFailure] = useState(false);
 
   const isMpesa = paymentMethod === 'STK_PUSH';
-
-  // Handle Paystack return
-  useEffect(() => {
-    const reference = searchParams.get('reference');
-    if (reference) {
-      router.replace('/payments', { scroll: false });
-    }
-  }, [searchParams, router]);
 
   // 🔄 POLLING EFFECT
   useEffect(() => {
@@ -147,7 +148,6 @@ export default function PaymentsPage() {
     setSuccessMessage(null);
 
     try {
-      // ✅ SAFE: Only accesses document in browser
       const csrfToken = getCSRFToken();
       if (!csrfToken) {
         throw new Error('CSRF token missing. Please refresh the page.');

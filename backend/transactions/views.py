@@ -1,6 +1,7 @@
 import logging
 import json
 from decimal import Decimal
+from uuid import uuid4
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.http import HttpResponse
@@ -12,17 +13,23 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import AllowAny
 from .models import Transaction
-from .utils import send_stk_push, verify_paystack_transaction
+from .utils import (
+    send_stk_push,
+    initialize_paystack_transaction,
+    normalize_phone_number,
+    verify_paystack_transaction
+)
 from django.db.models import Sum
 from datetime import datetime, timedelta
-import calendar
+from collections import OrderedDict
 
 
-# >>> INSERT THIS CLASS AFTER IMPORTS AND BEFORE TransactionListView <<<
+logger = logging.getLogger(__name__)
+
+
 class DashboardStatsView(APIView):
     def get(self, request):
         user = request.user
-        # Parse optional date range
         start_date_str = request.query_params.get('start')
         end_date_str = request.query_params.get('end')
 
@@ -35,11 +42,9 @@ class DashboardStatsView(APIView):
             except ValueError:
                 return Response({'error': 'Invalid date format. Use ISO 8601 (e.g., 2026-02-01)'}, status=400)
         else:
-            # Default: last 30 days
             end_date = timezone.now().date()
             start_date = end_date - timedelta(days=29)
 
-        # Build base queryset
         if user.is_superuser:
             queryset = Transaction.objects.filter(
                 status='COMPLETED',
@@ -52,11 +57,8 @@ class DashboardStatsView(APIView):
                 created_at__date__range=[start_date, end_date]
             )
 
-        # Total collected
         total = queryset.aggregate(total=Sum('amount'))['total'] or 0
 
-        # Daily trend data
-        from django.db.models import Count
         daily_data = (
             queryset
             .extra(select={'date': "DATE(created_at)"})
@@ -65,8 +67,6 @@ class DashboardStatsView(APIView):
             .order_by('date')
         )
 
-        # Ensure all dates in range are present (fill missing with 0)
-        from collections import OrderedDict
         date_cursor = start_date
         trend = OrderedDict()
         while date_cursor <= end_date:
@@ -82,10 +82,9 @@ class DashboardStatsView(APIView):
             'total_collected': str(total),
             'period_start': start_date.isoformat(),
             'period_end': end_date.isoformat(),
-            'trend': list(trend.items())  # List of [date, amount] pairs
+            'trend': list(trend.items())
         })
 
-logger = logging.getLogger(__name__)
 
 class TransactionListView(APIView):
     def get(self, request):
@@ -108,6 +107,7 @@ class TransactionListView(APIView):
             })
         return Response(data)
 
+
 class TransactionDetailView(APIView):
     def get(self, request, pk):
         try:
@@ -115,7 +115,6 @@ class TransactionDetailView(APIView):
         except Transaction.DoesNotExist:
             return Response({'error': 'Transaction not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        # Enforce visibility
         if not request.user.is_superuser and transaction.initiated_by != request.user:
             return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
 
@@ -132,12 +131,13 @@ class TransactionDetailView(APIView):
             'paystack_reference': transaction.paystack_reference,
         })
 
+
 class InitiatePaymentView(APIView):
     def post(self, request):
         user = request.user
         payment_method = request.data.get('payment_method')
         amount = request.data.get('amount')
-        customer_identifier = request.data.get('customer_identifier')  # phone for MPesa, email for Paystack
+        customer_identifier = request.data.get('customer_identifier')
 
         if not payment_method or not amount or not customer_identifier:
             return Response(
@@ -155,7 +155,7 @@ class InitiatePaymentView(APIView):
         if payment_method not in ['STK_PUSH', 'PAYSTACK']:
             return Response({'error': 'Invalid payment_method'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Create pending transaction
+        # Create pending transaction early so we can delete it on validation failure
         transaction = Transaction.objects.create(
             initiated_by=user,
             amount=amount,
@@ -171,32 +171,87 @@ class InitiatePaymentView(APIView):
             'message': 'Payment initiated'
         }
 
-        if payment_method == 'STK_PUSH':
-            # Initiate STK Push via Daraja
-            phone = customer_identifier
-            result = send_stk_push(phone, float(amount), transaction.id)
-            if result.get('success'):
-                transaction.mpesa_checkout_request_id = result.get('CheckoutRequestID')
-                transaction.save()
-                response_data['checkout_request_id'] = result.get('CheckoutRequestID')
-            else:
-                transaction.status = 'FAILED'
-                transaction.save()
-                return Response(
-                    {'error': 'Failed to initiate STK Push', 'details': result.get('error')},
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        try:
+            if payment_method == 'STK_PUSH':
+                phone = normalize_phone_number(customer_identifier)
+                result = send_stk_push(phone, float(amount), transaction.id)
+                if result.get('success'):
+                    transaction.mpesa_checkout_request_id = result.get('CheckoutRequestID')
+                    transaction.save()
+                    response_data['checkout_request_id'] = result.get('CheckoutRequestID')
+                else:
+                    transaction.status = 'FAILED'
+                    transaction.save()
+                    return Response(
+                        {'error': 'Failed to initiate STK Push', 'details': result.get('error')},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                    )
+
+            elif payment_method == 'PAYSTACK':
+                email = customer_identifier.strip()
+                if '@' not in email:
+                    transaction.delete()
+                    return Response(
+                        {'error': 'Invalid email address for Paystack'},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                reference = str(uuid4())
+                paystack_result = initialize_paystack_transaction(
+                    email=email,
+                    amount=amount,
+                    reference=reference
                 )
+                if paystack_result.get('success'):
+                    transaction.paystack_reference = reference
+                    transaction.save()
+                    response_data['paystack_reference'] = reference
+                    response_data['checkout_url'] = paystack_result['authorization_url']  # No spaces!
+                else:
+                    transaction.delete()  # Clean up since Paystack never saw it
+                    return Response(
+                        {'error': 'Failed to initialize Paystack', 'details': paystack_result.get('error')},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                    )
 
-        elif payment_method == 'PAYSTACK':
-            # Return Paystack checkout URL (frontend redirects)
-            from uuid import uuid4
-            reference = str(uuid4())
-            transaction.paystack_reference = reference
-            transaction.save()
-            response_data['paystack_reference'] = reference
-            response_data['checkout_url'] = f"https://paystack.com/pay/{reference}"  # frontend will use this
+            return Response(response_data, status=status.HTTP_201_CREATED)
 
-        return Response(response_data, status=status.HTTP_201_CREATED)
+        except ValueError as ve:
+            transaction.delete()
+            return Response(
+                {'error': 'Validation error', 'details': str(ve)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        except Exception as e:
+            transaction.delete()
+            logger.error(f"Unexpected error during payment initiation: {e}")
+            return Response(
+                {'error': 'Internal server error'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        
+
+
+
+# In views.py
+class VerifyPaystackTransactionView(APIView):
+    def get(self, request, reference):
+        try:
+            transaction = Transaction.objects.get(paystack_reference=reference)
+        except Transaction.DoesNotExist:
+            return Response({'error': 'Transaction not found'}, status=404)
+
+        # Enforce visibility (optional: allow public read for verification?)
+        if not request.user.is_superuser and transaction.initiated_by != request.user:
+            return Response({'error': 'Permission denied'}, status=403)
+
+        return Response({
+            'id': transaction.id,
+            'status': transaction.status,
+            'amount': str(transaction.amount),
+        })
+
+
 
 @method_decorator(csrf_exempt, name='dispatch')
 class DarajaWebhookView(APIView):
@@ -209,10 +264,11 @@ class DarajaWebhookView(APIView):
         except json.JSONDecodeError:
             return HttpResponse(status=400)
 
-        # Extract key fields
-        checkout_request_id = payload.get('Body', {}).get('stkCallback', {}).get('CheckoutRequestID')
-        result_code = payload.get('Body', {}).get('stkCallback', {}).get('ResultCode')
-        result_desc = payload.get('Body', {}).get('stkCallback', {}).get('ResultDesc', '')
+        body = payload.get('Body', {})
+        stk_callback = body.get('stkCallback', {})
+        checkout_request_id = stk_callback.get('CheckoutRequestID')
+        result_code = stk_callback.get('ResultCode')
+        result_desc = stk_callback.get('ResultDesc', '')
 
         if not checkout_request_id:
             logger.warning("Missing CheckoutRequestID in Daraja webhook")
@@ -233,6 +289,7 @@ class DarajaWebhookView(APIView):
         logger.info(f"Daraja webhook processed: {transaction.id} -> {transaction.status}")
         return HttpResponse("OK")
 
+
 @method_decorator(csrf_exempt, name='dispatch')
 class PaystackWebhookView(APIView):
     permission_classes = [AllowAny]
@@ -248,7 +305,6 @@ class PaystackWebhookView(APIView):
         if not signature:
             return HttpResponse(status=400)
 
-        # Verify signature (optional but recommended)
         import hmac
         import hashlib
         computed_signature = hmac.new(
@@ -272,7 +328,7 @@ class PaystackWebhookView(APIView):
         data = event.get('data', {})
         reference = data.get('reference')
         amount_kobo = data.get('amount')
-        status = data.get('status')
+        status_val = data.get('status')
 
         if not reference or not amount_kobo:
             return HttpResponse(status=400)
@@ -283,12 +339,11 @@ class PaystackWebhookView(APIView):
             logger.warning(f"Paystack transaction not found: {reference}")
             return HttpResponse(status=404)
 
-        # Convert kobo to decimal
         amount_paid = Decimal(amount_kobo) / 100
         if abs(transaction.amount - amount_paid) > Decimal('0.01'):
             logger.warning(f"Amount mismatch: expected {transaction.amount}, got {amount_paid}")
 
-        if status == 'success':
+        if status_val == 'success':
             transaction.status = 'COMPLETED'
         else:
             transaction.status = 'FAILED'

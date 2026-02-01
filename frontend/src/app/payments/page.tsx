@@ -3,7 +3,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import {
   Loader2,
   Smartphone,
@@ -17,7 +17,7 @@ import { api } from '@/lib/api';
 import DashboardLayout from '@/components/layout/DashboardLayout';
 
 type PaymentMethod = 'STK_PUSH' | 'PAYSTACK';
-type TransactionStatus = 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
+type TransactionStatus = 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
 
 interface TransactionResponse {
   id: number;
@@ -27,7 +27,6 @@ interface TransactionResponse {
   customer_identifier: string;
 }
 
-// ✅ Safe CSRF token extraction — only works in browser
 const getCSRFToken = (): string | null => {
   if (typeof document === 'undefined') return null;
   return (
@@ -41,26 +40,14 @@ const getCSRFToken = (): string | null => {
 export default function PaymentsPage() {
   const { user, loading: authLoading } = useAuth();
   const router = useRouter();
+  const searchParams = useSearchParams();
 
-  // Auth guard — only runs on client
+  // Auth guard
   useEffect(() => {
     if (!authLoading && !user) {
       router.push('/');
     }
   }, [user, authLoading, router]);
-
-  // Handle Paystack return using window.location (safe)
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-
-    const urlParams = new URLSearchParams(window.location.search);
-    const reference = urlParams.get('reference');
-
-    if (reference) {
-      // Clear query param without page reload
-      router.replace('/payments', { scroll: false });
-    }
-  }, [router]);
 
   // Form state
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('STK_PUSH');
@@ -78,7 +65,7 @@ export default function PaymentsPage() {
 
   const isMpesa = paymentMethod === 'STK_PUSH';
 
-  // 🔄 POLLING EFFECT
+  // 🔁 POLLING FOR MPESA OR ACTIVE TRANSACTION
   useEffect(() => {
     if (!activeTransactionId) return;
 
@@ -99,7 +86,7 @@ export default function PaymentsPage() {
         if (data.status === 'COMPLETED') {
           setShowConfirmation(true);
           setActiveTransactionId(null);
-        } else if (data.status === 'FAILED') {
+        } else if (['FAILED', 'CANCELLED'].includes(data.status)) {
           setShowFailure(true);
           setActiveTransactionId(null);
         }
@@ -113,6 +100,71 @@ export default function PaymentsPage() {
     return () => clearInterval(interval);
   }, [activeTransactionId]);
 
+  // ✅ HANDLE PAYSTACK RETURN (via ?reference=)
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const reference = searchParams.get('reference');
+    if (!reference) return;
+
+    // Clear query params immediately
+    router.replace('/payments', { scroll: false });
+
+    // Start verification flow
+    setPollingStatus('PROCESSING');
+    setError(null);
+    setSuccessMessage(null);
+
+    const verifyPayment = async () => {
+      const checkStatus = async (): Promise<boolean> => {
+        try {
+          const res = await fetch(`/api/transactions/paystack/verify/${reference}/`, {
+            credentials: 'include',
+          });
+
+          if (!res.ok) {
+            // Transaction not found or access denied
+            return false;
+          }
+
+          const data = await res.json();
+          if (data.status === 'COMPLETED') {
+            setShowConfirmation(true);
+            return true;
+          } else if (['FAILED', 'CANCELLED'].includes(data.status)) {
+            setShowFailure(true);
+            return true;
+          }
+          return false;
+        } catch (err) {
+          console.error('Verification check failed:', err);
+          return false;
+        }
+      };
+
+      // Try up to 6 times (12 seconds total)
+      let attempts = 0;
+      const maxAttempts = 6;
+      const poll = async () => {
+        const done = await checkStatus();
+        if (!done && attempts < maxAttempts) {
+          attempts++;
+          setTimeout(poll, 2000);
+        } else if (!done) {
+          // Timeout — assume webhook will update later
+          setError(
+            'Payment verification is taking longer than expected. You’ll receive a confirmation email once complete.'
+          );
+          setPollingStatus(null);
+        }
+      };
+
+      poll();
+    };
+
+    verifyPayment();
+  }, [searchParams, router]);
+
   const validateInputs = () => {
     setError(null);
 
@@ -123,8 +175,7 @@ export default function PaymentsPage() {
     }
 
     if (isMpesa) {
-      const phoneRegex = /^(\+?254|0)?[17]\d{8}$/;
-      if (!phoneRegex.test(identifier.replace(/\s/g, ''))) {
+      if (!/^0[17]\d{8}$/.test(identifier)) {
         setError('Please enter a valid Kenyan phone number (e.g., 0712345678)');
         return false;
       }
@@ -171,7 +222,7 @@ export default function PaymentsPage() {
 
       if (res.ok) {
         if (paymentMethod === 'PAYSTACK' && data.checkout_url) {
-          window.location.href = data.checkout_url;
+          window.location.href = data.checkout_url; // Redirect to Paystack
         } else if (data.id) {
           setActiveTransactionId(data.id);
           setSuccessMessage('Payment request sent! Please check your phone to complete.');
@@ -196,7 +247,6 @@ export default function PaymentsPage() {
     router.push('/dashboard');
   };
 
-  // Show loader while auth is resolving
   if (authLoading || !user) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#fdf5e6]">
@@ -264,35 +314,13 @@ export default function PaymentsPage() {
         </div>
 
         <div className="bg-white rounded-2xl shadow-sm border border-[#003c25]/10 p-6">
-          {/* Method Toggle */}
-          <div className="flex gap-2 mb-6">
-            <button
-              type="button"
-              onClick={() => setPaymentMethod('STK_PUSH')}
-              disabled={!!activeTransactionId}
-              className={`flex-1 flex items-center justify-center gap-2 py-3 px-4 rounded-xl transition ${
-                isMpesa
-                  ? 'bg-[#003c25] text-[#fdf5e6]'
-                  : 'bg-[#fdf5e6] text-[#003c25] hover:bg-[#003c25]/5'
-              } ${activeTransactionId ? 'opacity-60 cursor-not-allowed' : ''}`}
-            >
-              <Smartphone className="w-5 h-5" />
-              MPesa (STK Push)
-            </button>
-            <button
-              type="button"
-              onClick={() => setPaymentMethod('PAYSTACK')}
-              disabled={!!activeTransactionId}
-              className={`flex-1 flex items-center justify-center gap-2 py-3 px-4 rounded-xl transition ${
-                !isMpesa
-                  ? 'bg-[#003c25] text-[#fdf5e6]'
-                  : 'bg-[#fdf5e6] text-[#003c25] hover:bg-[#003c25]/5'
-              } ${activeTransactionId ? 'opacity-60 cursor-not-allowed' : ''}`}
-            >
-              <CreditCard className="w-5 h-5" />
-              Paystack (Card/Bank)
-            </button>
-          </div>
+          {/* Verification Status Banner (for Paystack return) */}
+          {pollingStatus === 'PROCESSING' && (
+            <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-xl flex items-center gap-3 animate-fade-in">
+              <Loader2 className="w-5 h-5 animate-spin text-blue-600" />
+              <span className="text-blue-800">Verifying your payment...</span>
+            </div>
+          )}
 
           {/* Success Banner */}
           {successMessage && (
@@ -309,8 +337,8 @@ export default function PaymentsPage() {
             </div>
           )}
 
-          {/* Polling Status Indicator */}
-          {activeTransactionId && (
+          {/* Polling Status Indicator (for MPesa) */}
+          {activeTransactionId && pollingStatus !== 'PROCESSING' && (
             <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-xl flex items-center gap-3 animate-fade-in">
               <Loader2 className="w-5 h-5 animate-spin text-blue-600" />
               <span className="text-blue-800">
@@ -334,7 +362,7 @@ export default function PaymentsPage() {
                 step="0.01"
                 value={amount}
                 onChange={(e) => setAmount(e.target.value)}
-                disabled={isSubmitting || !!activeTransactionId}
+                disabled={isSubmitting || !!activeTransactionId || pollingStatus === 'PROCESSING'}
                 className="w-full px-4 py-3.5 bg-[#fdf5e6] border border-[#003c25]/20 rounded-xl focus:ring-2 focus:ring-[#cc5500] focus:border-transparent outline-none transition"
                 placeholder="e.g., 500"
                 required
@@ -348,23 +376,32 @@ export default function PaymentsPage() {
               <input
                 id="identifier"
                 type={isMpesa ? 'tel' : 'email'}
+                inputMode={isMpesa ? 'numeric' : undefined}
                 value={identifier}
-                onChange={(e) => setIdentifier(e.target.value)}
-                disabled={isSubmitting || !!activeTransactionId}
+                onChange={(e) => {
+                  let value = e.target.value;
+                  if (isMpesa) {
+                    value = value.replace(/\D/g, '').slice(0, 10);
+                  }
+                  setIdentifier(value);
+                }}
+                disabled={isSubmitting || !!activeTransactionId || pollingStatus === 'PROCESSING'}
                 className="w-full px-4 py-3.5 bg-[#fdf5e6] border border-[#003c25]/20 rounded-xl focus:ring-2 focus:ring-[#cc5500] focus:border-transparent outline-none transition"
                 placeholder={isMpesa ? '0712345678' : 'customer@example.com'}
                 required
+                pattern={isMpesa ? '0[17][0-9]{8}' : undefined}
+                title={isMpesa ? 'Enter a 10-digit Kenyan number starting with 07 or 01' : undefined}
               />
               <p className="mt-1.5 text-xs text-[#003c25]/60">
                 {isMpesa
-                  ? 'Enter a valid Kenyan mobile number'
+                  ? 'Enter a 10-digit number starting with 07 or 01 (e.g., 0712345678)'
                   : 'Customer will receive a secure payment link'}
               </p>
             </div>
 
             <button
               type="submit"
-              disabled={isSubmitting || !!activeTransactionId}
+              disabled={isSubmitting || !!activeTransactionId || pollingStatus === 'PROCESSING'}
               className="w-full bg-[#003c25] hover:bg-[#002f1d] text-[#fdf5e6] font-semibold py-3.5 px-4 rounded-xl transition flex items-center justify-center gap-2 disabled:opacity-70 disabled:cursor-not-allowed transform hover:scale-[1.02] active:scale-[1.00]"
             >
               {isSubmitting ? (
@@ -382,7 +419,6 @@ export default function PaymentsPage() {
         </div>
       </div>
 
-      {/* Global Animations */}
       <style jsx global>{`
         @keyframes pop-in {
           0% { opacity: 0; transform: scale(0.9); }

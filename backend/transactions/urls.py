@@ -8,4 +8,7 @@ urlpatterns = [
     path('<int:pk>/', views.TransactionDetailView.as_view(), name='transaction-detail'),
     path('webhook/daraja/', views.DarajaWebhookView.as_view(), name='daraja-webhook'),
     path('webhook/paystack/', views.PaystackWebhookView.as_view(), name='paystack-webhook'),
+    path('api/transactions/paystack/verify/<str:reference>/', 
+     views.VerifyPaystackTransactionView.as_view(), 
+     name='verify_paystack_transaction'),
 ]

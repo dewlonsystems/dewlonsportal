@@ -1,6 +1,9 @@
+// src/app/payments/page.tsx
 'use client';
+
 export const dynamic = 'force-dynamic';
-export const fetchCache = 'force-no-store'; 
+export const fetchCache = 'force-no-store';
+export const revalidate = 0;
 
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '@/context/AuthContext';
@@ -28,12 +31,23 @@ interface TransactionResponse {
   customer_identifier: string;
 }
 
+// ✅ Safe CSRF token extraction — only works in browser
+const getCSRFToken = (): string | null => {
+  if (typeof document === 'undefined') return null;
+  return (
+    document.cookie
+      .split('; ')
+      .find((row) => row.startsWith('csrftoken='))
+      ?.split('=')[1] || null
+  );
+};
+
 export default function PaymentsPage() {
   const { user, loading: authLoading } = useAuth();
   const router = useRouter();
   const searchParams = useSearchParams();
 
-  // Auth guard
+  // Auth guard — only runs on client
   useEffect(() => {
     if (!authLoading && !user) {
       router.push('/');
@@ -56,14 +70,11 @@ export default function PaymentsPage() {
 
   const isMpesa = paymentMethod === 'STK_PUSH';
 
-  // Handle Paystack return (if redirected back with reference)
+  // Handle Paystack return
   useEffect(() => {
     const reference = searchParams.get('reference');
     if (reference) {
-      // Clear URL to avoid re-trigger
       router.replace('/payments', { scroll: false });
-      // In a real app, you'd fetch by reference — but we rely on polling via ID
-      // So this is just a fallback; main flow uses transaction ID
     }
   }, [searchParams, router]);
 
@@ -92,18 +103,13 @@ export default function PaymentsPage() {
           setShowFailure(true);
           setActiveTransactionId(null);
         }
-        // Continue polling if PENDING/PROCESSING
       } catch (err) {
         console.error('Polling error:', err);
       }
     };
 
-    // Initial poll immediately
     pollStatus();
-
-    // Then poll every 3 seconds
     const interval = setInterval(pollStatus, 3000);
-
     return () => clearInterval(interval);
   }, [activeTransactionId]);
 
@@ -142,17 +148,17 @@ export default function PaymentsPage() {
     setSuccessMessage(null);
 
     try {
-      const csrfCookie = document.cookie
-        .split('; ')
-        .find(row => row.startsWith('csrftoken='))?.split('=')[1];
-
-      if (!csrfCookie) throw new Error('CSRF token missing');
+      // ✅ SAFE: Only accesses document in browser
+      const csrfToken = getCSRFToken();
+      if (!csrfToken) {
+        throw new Error('CSRF token missing. Please refresh the page.');
+      }
 
       const res = await fetch(api.transactions.initiate, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-CSRFToken': csrfCookie,
+          'X-CSRFToken': csrfToken,
         },
         credentials: 'include',
         body: JSON.stringify({
@@ -168,7 +174,6 @@ export default function PaymentsPage() {
         if (paymentMethod === 'PAYSTACK' && data.checkout_url) {
           window.location.href = data.checkout_url;
         } else if (data.id) {
-          // MPesa: start polling
           setActiveTransactionId(data.id);
           setSuccessMessage('Payment request sent! Please check your phone to complete.');
           setAmount('');
@@ -180,19 +185,19 @@ export default function PaymentsPage() {
       }
     } catch (err: any) {
       console.error('Payment error:', err);
-      setError('Network error. Please check your connection.');
+      setError(err.message || 'Network error. Please check your connection.');
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  // Reset flow
   const resetFlow = () => {
     setShowConfirmation(false);
     setShowFailure(false);
     router.push('/dashboard');
   };
 
+  // Show loader while auth is resolving
   if (authLoading || !user) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#fdf5e6]">

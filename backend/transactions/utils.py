@@ -4,20 +4,22 @@ import json
 from django.conf import settings
 from django.core.cache import cache
 from decouple import config
+from django.utils import timezone
 
 # Daraja credentials (from .env)
 DARAJA_CONSUMER_KEY = config('DARAJA_CONSUMER_KEY', default='')
 DARAJA_CONSUMER_SECRET = config('DARAJA_CONSUMER_SECRET', default='')
 DARAJA_SHORTCODE = config('DARAJA_SHORTCODE', default='')
 DARAJA_PASSKEY = config('DARAJA_PASSKEY', default='')
-DARAJA_CALLBACK_URL = config('DARAJA_CALLBACK_URL', default='http://localhost:8000/api/transactions/webhook/daraja/')
+DARAJA_CALLBACK_URL = config('DARAJA_CALLBACK_URL', default='https://api.dewlons.com/api/transactions/webhook/daraja/')
+DARAJA_TILLNUMBER = config('DARAJA_TILLNUMBER', default='')
 
 def get_daraja_token():
     token = cache.get('daraja_access_token')
     if token:
         return token
 
-    url = 'https://sandbox.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials'
+    url = 'https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials'
     credentials = base64.b64encode(f"{DARAJA_CONSUMER_KEY}:{DARAJA_CONSUMER_SECRET}".encode()).decode()
     headers = {'Authorization': f'Basic {credentials}'}
     response = requests.get(url, headers=headers)
@@ -45,10 +47,10 @@ def send_stk_push(phone_number, amount, transaction_id):
             "BusinessShortCode": DARAJA_SHORTCODE,
             "Password": password,
             "Timestamp": timestamp,
-            "TransactionType": "CustomerPayBillOnline",
+            "TransactionType": "CustomerBuyGoodsOnline",
             "Amount": int(amount),
             "PartyA": phone_number,
-            "PartyB": DARAJA_SHORTCODE,
+            "PartyB": DARAJA_TILLNUMBER,
             "PhoneNumber": phone_number,
             "CallBackURL": callback_url,
             "AccountReference": f"TXN{transaction_id}",
@@ -61,7 +63,7 @@ def send_stk_push(phone_number, amount, transaction_id):
         }
 
         response = requests.post(
-            'https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest',
+            'https://api.safaricom.co.ke/mpesa/stkpush/v1/processrequest',
             json=payload,
             headers=headers
         )

@@ -133,10 +133,15 @@ LOGGING = {
 }
 
 
+
 CSRF_TRUSTED_ORIGINS = config('CSRF_TRUSTED_ORIGINS', default='http://localhost:3000').split(',')
 CSRF_COOKIE_HTTPONLY = False  # Required so React can read it (safe because we use SameSite)
-CSRF_COOKIE_SAMESITE = 'Lax'
-SESSION_COOKIE_SAMESITE = 'Lax'
+CSRF_COOKIE_SAMESITE = 'None'
+SESSION_COOKIE_SAMESITE = 'None'
 SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_DOMAIN = ".dewlons.com"
+CSRF_COOKIE_DOMAIN = ".dewlons.com"
+SESSION_COOKIE_SECURE = True
+CSRF_COOKIE_SECURE = True
 
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'

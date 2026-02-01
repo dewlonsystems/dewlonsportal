@@ -4,19 +4,18 @@ import { User } from '@/context/AuthContext';
 import { 
   LayoutDashboard, 
   CreditCard, 
-  FileText,
-  ChevronLeft
+  FileText
 } from 'lucide-react';
 import { usePathname } from 'next/navigation';
+import { useSidebar } from './SidebarContext';
 
 interface SidebarProps {
   user: User;
-  isOpen: boolean;
-  toggle: () => void;
 }
 
-export default function Sidebar({ user, isOpen, toggle }: SidebarProps) {
+export default function Sidebar({ user }: SidebarProps) {
   const pathname = usePathname();
+  const { isSidebarOpen, closeSidebar } = useSidebar();
 
   const navItems = [
     { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
@@ -24,36 +23,35 @@ export default function Sidebar({ user, isOpen, toggle }: SidebarProps) {
     { name: 'Transactions', href: '/transactions', icon: FileText },
   ];
 
+  const handleLinkClick = () => {
+    if (window.innerWidth < 1024) { // lg breakpoint
+      closeSidebar();
+    }
+  };
+
   return (
     <>
       {/* Overlay for mobile */}
-      {isOpen && (
+      {isSidebarOpen && (
         <div 
           className="fixed inset-0 z-20 bg-black/40 lg:hidden"
-          onClick={toggle}
+          onClick={closeSidebar}
         />
       )}
 
-      {/* ✅ ALWAYS FIXED — no lg:static, always fixed */}
+      {/* Sidebar */}
       <div
-        className={`fixed z-30 w-64 h-screen bg-white border-r border-primary/10 transform transition-transform duration-300 ease-in-out ${
-          isOpen ? 'translate-x-0' : '-translate-x-full'
+        className={`fixed lg:static z-30 w-64 h-screen bg-white border-r border-primary/10 transform transition-transform duration-300 ease-in-out ${
+          isSidebarOpen ? 'translate-x-0' : '-translate-x-full'
         } lg:translate-x-0`}
       >
-        <div className="p-4 border-b border-primary/10 flex items-center justify-between">
+        <div className="p-4 border-b border-primary/10">
           <div className="flex items-center gap-2">
             <div className="w-8 h-8 bg-primary rounded-lg flex items-center justify-center">
               <LayoutDashboard className="w-5 h-5 text-secondary" />
             </div>
             <span className="font-bold text-primary">Portal</span>
           </div>
-          <button
-            onClick={toggle}
-            className="lg:hidden p-1 text-primary hover:bg-primary/10 rounded"
-            aria-label="Close menu"
-          >
-            <ChevronLeft className="w-5 h-5" />
-          </button>
         </div>
 
         <nav className="p-4 h-[calc(100vh-73px)] overflow-y-auto">
@@ -66,6 +64,7 @@ export default function Sidebar({ user, isOpen, toggle }: SidebarProps) {
                 <li key={item.name}>
                   <Link
                     href={item.href}
+                    onClick={handleLinkClick}
                     className={`flex items-center gap-3 w-full px-3 py-2.5 rounded-lg transition ${
                       isActive
                         ? 'bg-primary text-secondary'

@@ -115,7 +115,7 @@ export default function LoginPage() {
 
           <div className="mt-8 pt-6 border-t border-primary/10 text-center">
             <p className="text-sm text-primary/60">
-              © {new Date().getFullYear()} Portal. All rights reserved.
+              © {new Date().getFullYear()} Dewlon Systems. All rights reserved.
             </p>
           </div>
         </div>

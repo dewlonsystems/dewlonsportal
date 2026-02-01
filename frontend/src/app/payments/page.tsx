@@ -79,13 +79,13 @@ export default function PaymentsPage() {
           return;
         }
 
-        const data: TransactionResponse = await res.json();
-        setPollingStatus(data.status);
+        const transactionData: TransactionResponse = await res.json();
+        setPollingStatus(transactionData.status);
 
-        if (data.status === 'COMPLETED') {
+        if (transactionData.status === 'COMPLETED') {
           setShowConfirmation(true);
           setActiveTransactionId(null);
-        } else if (['FAILED', 'CANCELLED'].includes(data.status)) {
+        } else if (['FAILED', 'CANCELLED'].includes(transactionData.status)) {
           setShowFailure(true);
           setActiveTransactionId(null);
         }

@@ -1,3 +1,5 @@
 backend/.env
 frontend/.gitignore
 frontend/.env
+/backend/staticfiles/
+backend/staticfiles/

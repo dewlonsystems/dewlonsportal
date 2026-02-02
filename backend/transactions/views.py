@@ -254,7 +254,7 @@ class VerifyPaystackTransactionView(APIView):
     """
     permission_classes = [IsAuthenticated]
     
-    def post(self, request, reference):
+    def get(self, request, reference):
         try:
             transaction = Transaction.objects.get(paystack_reference=reference)
         except Transaction.DoesNotExist:

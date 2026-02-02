@@ -353,12 +353,18 @@ class QueryMpesaTransactionStatusView(APIView):
 # ========================
 
 @csrf_exempt
-@require_http_methods(["POST"])
 def daraja_webhook(request):
     """
     Handle M-Pesa STK Push callback from Safaricom.
     Must return plain-text 'OK' with HTTP 200.
     """
+    if request.method == 'GET':
+        logger.info("Daraja webhook health check (GET)")
+        return HttpResponse("OK", status=200)
+    if request.method != 'POST':
+        logger.warning(f"Daraja webhook received {request.method} method")
+        return HttpResponse("Method not allowed", status=405)
+    
     logger.info("Received Daraja webhook")
     
     try:
@@ -414,12 +420,18 @@ def daraja_webhook(request):
 
 
 @csrf_exempt
-@require_http_methods(["POST"])
 def paystack_webhook(request):
     """
     Handle Paystack webhook events.
     Must always return HTTP 200 to acknowledge receipt.
     """
+    if request.method == 'GET':
+        logger.info("Paystack webhook health check (GET)")
+        return HttpResponse(status=200)
+    if request.method != 'POST':
+        logger.warning(f"Paystack webhook received {request.method} method")
+        return HttpResponse(status=405)
+    
     logger.info("Received Paystack webhook")
     
     # ✅ Use PAYSTACK_WEBHOOK_SECRET, not PAYSTACK_SECRET_KEY

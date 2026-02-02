@@ -31,6 +31,10 @@ class Transaction(models.Model):
     mpesa_checkout_request_id = models.CharField(max_length=100, blank=True, null=True)  # For STK Push
     paystack_reference = models.CharField(max_length=100, blank=True, null=True)         # For Paystack
 
+    response_data = models.JSONField(default=dict, blank=True, null=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
     # Optional: phone number or email used in payment
     customer_identifier = models.CharField(max_length=50, blank=True, help_text="Phone (for MPesa) or Email (for Paystack)")
 

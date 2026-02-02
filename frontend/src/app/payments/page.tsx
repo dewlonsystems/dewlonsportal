@@ -1,11 +1,9 @@
 // src/app/payments/page.tsx
 'use client';
 
-export const dynamic = 'force-dynamic';
-
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useRouter } from 'next/navigation';
 import {
   Loader2,
   Smartphone,
@@ -42,7 +40,6 @@ const getCSRFToken = (): string | null => {
 export default function PaymentsPage() {
   const { user, loading: authLoading } = useAuth();
   const router = useRouter();
-  const searchParams = useSearchParams();
 
   // 🔐 Auth guard — only runs after initial auth state is resolved
   useEffect(() => {
@@ -102,12 +99,16 @@ export default function PaymentsPage() {
     return () => clearInterval(interval);
   }, [activeTransactionId]);
 
-  // ✅ HANDLE PAYSTACK RETURN (using searchParams — safe and modern)
+  // ✅ HANDLE PAYSTACK RETURN — using window.location (safe for build)
   useEffect(() => {
-    const reference = searchParams.get('reference');
-    if (!reference || typeof window === 'undefined') return;
+    if (typeof window === 'undefined') return;
 
-    // Clear query params immediately after reading
+    const urlParams = new URLSearchParams(window.location.search);
+    const reference = urlParams.get('reference');
+
+    if (!reference) return;
+
+    // Clear query params immediately
     router.replace('/payments', { scroll: false });
 
     // Start verification flow
@@ -160,7 +161,7 @@ export default function PaymentsPage() {
     };
 
     verifyPayment();
-  }, [searchParams, router]); // ← Now depends on searchParams (correct for Next.js App Router)
+  }, [router]); // Only depend on router
 
   const validateInputs = () => {
     setError(null);
@@ -219,7 +220,7 @@ export default function PaymentsPage() {
 
       if (res.ok) {
         if (paymentMethod === 'PAYSTACK' && data.checkout_url) {
-          window.location.href = data.checkout_url; // Full redirect to Paystack
+          window.location.href = data.checkout_url;
         } else if (data.id) {
           setActiveTransactionId(data.id);
           setSuccessMessage('Payment request sent! Please check your phone to complete.');

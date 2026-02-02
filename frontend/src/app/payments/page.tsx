@@ -3,7 +3,7 @@
 
 import { useState, useEffect } from 'react';
 import { useAuth } from '@/context/AuthContext';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import {
   Loader2,
   Smartphone,
@@ -40,8 +40,9 @@ const getCSRFToken = (): string | null => {
 export default function PaymentsPage() {
   const { user, loading: authLoading } = useAuth();
   const router = useRouter();
+  const searchParams = useSearchParams();
 
-  // Auth guard — only runs on client
+  // 🔐 Auth guard — only runs after initial auth state is resolved
   useEffect(() => {
     if (!authLoading && !user) {
       router.push('/');
@@ -99,16 +100,12 @@ export default function PaymentsPage() {
     return () => clearInterval(interval);
   }, [activeTransactionId]);
 
-  // ✅ HANDLE PAYSTACK RETURN (using window.location — safe for prerender)
+  // ✅ HANDLE PAYSTACK RETURN (using searchParams — safe and modern)
   useEffect(() => {
-    if (typeof window === 'undefined') return;
+    const reference = searchParams.get('reference');
+    if (!reference || typeof window === 'undefined') return;
 
-    const urlParams = new URLSearchParams(window.location.search);
-    const reference = urlParams.get('reference');
-
-    if (!reference) return;
-
-    // Clear query params immediately
+    // Clear query params immediately after reading
     router.replace('/payments', { scroll: false });
 
     // Start verification flow
@@ -161,7 +158,7 @@ export default function PaymentsPage() {
     };
 
     verifyPayment();
-  }, [router]); // Only depends on router
+  }, [searchParams, router]); // ← Now depends on searchParams (correct for Next.js App Router)
 
   const validateInputs = () => {
     setError(null);
@@ -220,7 +217,7 @@ export default function PaymentsPage() {
 
       if (res.ok) {
         if (paymentMethod === 'PAYSTACK' && data.checkout_url) {
-          window.location.href = data.checkout_url;
+          window.location.href = data.checkout_url; // Full redirect to Paystack
         } else if (data.id) {
           setActiveTransactionId(data.id);
           setSuccessMessage('Payment request sent! Please check your phone to complete.');
@@ -246,12 +243,18 @@ export default function PaymentsPage() {
   };
 
   // Show loader while auth is resolving
-  if (authLoading || !user) {
+  if (authLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#fdf5e6]">
         <Loader2 className="w-8 h-8 animate-spin text-[#003c25]" />
       </div>
     );
+  }
+
+  // Redirect if not authenticated (after loading is done)
+  if (!user) {
+    router.push('/');
+    return null;
   }
 
   return (
@@ -313,7 +316,7 @@ export default function PaymentsPage() {
         </div>
 
         <div className="bg-white rounded-2xl shadow-sm border border-[#003c25]/10 p-6">
-          {/* ✅ RESTORED: Method Toggle */}
+          {/* Method Toggle */}
           <div className="flex gap-2 mb-6">
             <button
               type="button"

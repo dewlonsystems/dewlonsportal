@@ -2,7 +2,6 @@
 'use client';
 
 import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
-import { usePathname } from 'next/navigation';
 
 // ✅ API base URL
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000';
@@ -21,75 +20,61 @@ interface AuthContextType {
   user: User | null;
   login: (username: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
-  loading: boolean;
+  loading: boolean; // true only during initial session restoration
 }
 
 // ✅ Create context
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-// ✅ Protected route prefixes — extend this as needed
-const PROTECTED_ROUTE_PREFIXES = ['/dashboard', '/admin', '/profile', '/settings'];
-
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
-  const [loading, setLoading] = useState(true);
-  const pathname = usePathname();
+  const [loading, setLoading] = useState(true); // only true on initial client-side load
 
+  // 🔁 Always attempt to restore session on app mount (client-only)
   useEffect(() => {
-    // ✅ Determine if current route requires authentication
-    const isProtectedRoute = PROTECTED_ROUTE_PREFIXES.some((prefix) =>
-      pathname?.startsWith(prefix)
-    );
-
-    // 🔓 Public route: skip auth initialization entirely
-    if (!isProtectedRoute) {
-      setLoading(false);
-      return;
-    }
-
-    // 🔒 Protected route: fetch user session
     const fetchUser = async () => {
       try {
         const res = await fetch(`${API_BASE}/api/auth/user/`, {
-          credentials: 'include',
+          credentials: 'include', // ← sends Django session cookie
         });
 
         if (res.ok) {
           const userData = await res.json();
           setUser(userData);
         }
-        // If not ok, user remains null → handled by page-level redirect
+        // If not authenticated, leave user as null — that's expected
       } catch (err) {
-        console.error('Failed to fetch user:', err);
+        console.error('Failed to fetch user session:', err);
       } finally {
-        setLoading(false);
+        setLoading(false); // ← critical: always resolve loading state
       }
     };
 
     fetchUser();
-  }, [pathname]);
+  }, []); // Run once when component mounts on client
 
-  // ✅ Login function — no redirect
+  // ✅ Login function — establishes session via Django
   const login = async (username: string, password: string) => {
-    // Get CSRF token
+    // Ensure we have a CSRF token by fetching any endpoint that sets it
     await fetch(`${API_BASE}/api/auth/user/`, { credentials: 'include' });
 
-    const csrfCookie = document.cookie
+    // Extract CSRF token from cookie
+    const csrfToken = document.cookie
       .split('; ')
-      .find(row => row.startsWith('csrftoken='))
+      .find((row) => row.startsWith('csrftoken='))
       ?.split('=')[1];
 
-    if (!csrfCookie) {
-      throw new Error('CSRF token missing');
+    if (!csrfToken) {
+      throw new Error('CSRF token missing. Please refresh and try again.');
     }
 
     const res = await fetch(`${API_BASE}/api/auth/login/`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-CSRFToken': csrfCookie,
+        'X-CSRFToken': csrfToken,
       },
-      credentials: 'include',
+      credentials: 'include', // ← includes session cookie
       body: JSON.stringify({ username, password }),
     });
 
@@ -97,22 +82,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const userData = await res.json();
       setUser(userData);
     } else {
-      const error = await res.json().catch(() => ({}));
-      throw new Error(error.error || 'Login failed');
+      const errorData = await res.json().catch(() => ({}));
+      throw new Error(errorData.error || 'Login failed. Please check your credentials.');
     }
   };
 
-  // ✅ Logout function — no redirect
+  // ✅ Logout function — clears session on backend and frontend
   const logout = async () => {
-    const csrfCookie = document.cookie
+    const csrfToken = document.cookie
       .split('; ')
-      .find(row => row.startsWith('csrftoken='))
+      .find((row) => row.startsWith('csrftoken='))
       ?.split('=')[1];
 
     await fetch(`${API_BASE}/api/auth/logout/`, {
       method: 'POST',
       headers: {
-        'X-CSRFToken': csrfCookie || '',
+        'X-CSRFToken': csrfToken || '',
       },
       credentials: 'include',
     });
@@ -127,7 +112,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 }
 
-// ✅ Custom hook
+// ✅ Custom hook for easy access
 export function useAuth() {
   const context = useContext(AuthContext);
   if (context === undefined) {

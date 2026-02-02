@@ -70,7 +70,7 @@ export default function PaymentsPage() {
 
     const pollStatus = async () => {
       try {
-        const res = await fetch(`/api/transactions/${activeTransactionId}/`, {
+        const res = await fetch(api.transactions.detail(activeTransactionId), {
           credentials: 'include',
         });
 
@@ -119,9 +119,7 @@ export default function PaymentsPage() {
     const verifyPayment = async () => {
       const checkStatus = async (): Promise<boolean> => {
         try {
-          const res = await fetch(`/api/transactions/paystack/verify/${reference}/`, {
-            credentials: 'include',
-          });
+          const res = await fetch(api.transactions.verifyPaystack(reference), { credentials: 'include' })
 
           if (!res.ok) {
             return false;

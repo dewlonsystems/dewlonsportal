@@ -13,5 +13,6 @@ export const api = {
     initiate: `${API_BASE}/api/transactions/initiate/`,
     stats: `${API_BASE}/api/transactions/stats/`,
     detail: (id: number) => `${API_BASE}/api/transactions/${id}/`,
+    verifyPaystack: (reference: string) => `${API_BASE}/api/transactions/paystack/verify/${reference}/`,
   },
 };

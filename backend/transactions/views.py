@@ -1,9 +1,10 @@
 import logging
 import json
+import hmac  # ✅ ADDED
+import hashlib  # ✅ ADDED
 from decimal import Decimal
 from uuid import uuid4
 from django.conf import settings
-from django.contrib.auth.models import User
 from django.http import HttpResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
@@ -11,12 +12,14 @@ from django.views.decorators.http import require_http_methods
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from .models import Transaction
 from .utils import (
     send_stk_push,
     initialize_paystack_transaction,
     normalize_phone_number,
-    verify_paystack_transaction
+    verify_paystack_transaction,
+    query_daraja_transaction_status  # ✅ ADDED
 )
 from django.db.models import Sum
 from datetime import datetime, timedelta
@@ -26,6 +29,8 @@ logger = logging.getLogger(__name__)
 
 
 class DashboardStatsView(APIView):
+    permission_classes = [IsAuthenticated]
+    
     def get(self, request):
         user = request.user
         start_date_str = request.query_params.get('start')
@@ -85,12 +90,14 @@ class DashboardStatsView(APIView):
 
 
 class TransactionListView(APIView):
+    permission_classes = [IsAuthenticated]
+    
     def get(self, request):
         user = request.user
         if user.is_superuser:
-            transactions = Transaction.objects.all()
+            transactions = Transaction.objects.all().order_by('-created_at')
         else:
-            transactions = Transaction.objects.filter(initiated_by=user)
+            transactions = Transaction.objects.filter(initiated_by=user).order_by('-created_at')
         
         data = []
         for t in transactions:
@@ -102,11 +109,15 @@ class TransactionListView(APIView):
                 'initiated_by': t.initiated_by.first_name or t.initiated_by.username,
                 'created_at': t.created_at.isoformat(),
                 'customer_identifier': t.customer_identifier,
+                'mpesa_checkout_request_id': t.mpesa_checkout_request_id,
+                'paystack_reference': t.paystack_reference,
             })
         return Response(data)
 
 
 class TransactionDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+    
     def get(self, request, pk):
         try:
             transaction = Transaction.objects.get(pk=pk)
@@ -127,10 +138,13 @@ class TransactionDetailView(APIView):
             'customer_identifier': transaction.customer_identifier,
             'mpesa_checkout_request_id': transaction.mpesa_checkout_request_id,
             'paystack_reference': transaction.paystack_reference,
+            'response_data': transaction.response_data,
         })
 
 
 class InitiatePaymentView(APIView):
+    permission_classes = [IsAuthenticated]
+    
     def post(self, request):
         user = request.user
         payment_method = request.data.get('payment_method')
@@ -174,10 +188,13 @@ class InitiatePaymentView(APIView):
                 result = send_stk_push(phone, float(amount), transaction.id)
                 if result.get('success'):
                     transaction.mpesa_checkout_request_id = result.get('CheckoutRequestID')
+                    transaction.response_data = result
                     transaction.save()
                     response_data['checkout_request_id'] = result.get('CheckoutRequestID')
+                    response_data['customer_message'] = result.get('CustomerMessage')
                 else:
                     transaction.status = 'FAILED'
+                    transaction.response_data = result
                     transaction.save()
                     return Response(
                         {'error': 'Failed to initiate STK Push', 'details': result.get('error')},
@@ -201,11 +218,14 @@ class InitiatePaymentView(APIView):
                 )
                 if paystack_result.get('success'):
                     transaction.paystack_reference = reference
+                    transaction.response_data = paystack_result
                     transaction.save()
                     response_data['paystack_reference'] = reference
                     response_data['checkout_url'] = paystack_result['authorization_url']
                 else:
-                    transaction.delete()
+                    transaction.status = 'FAILED'
+                    transaction.response_data = paystack_result
+                    transaction.save()
                     return Response(
                         {'error': 'Failed to initialize Paystack', 'details': paystack_result.get('error')},
                         status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -229,7 +249,12 @@ class InitiatePaymentView(APIView):
 
 
 class VerifyPaystackTransactionView(APIView):
-    def get(self, request, reference):
+    """
+    Manual verification endpoint - calls Paystack API to check transaction status
+    """
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request, reference):
         try:
             transaction = Transaction.objects.get(paystack_reference=reference)
         except Transaction.DoesNotExist:
@@ -238,11 +263,89 @@ class VerifyPaystackTransactionView(APIView):
         if not request.user.is_superuser and transaction.initiated_by != request.user:
             return Response({'error': 'Permission denied'}, status=403)
 
-        return Response({
-            'id': transaction.id,
-            'status': transaction.status,
-            'amount': str(transaction.amount),
-        })
+        # Call Paystack API to verify
+        verification_result = verify_paystack_transaction(reference)
+        
+        if verification_result.get('success'):
+            paystack_data = verification_result['data'].get('data', {})
+            status_val = paystack_data.get('status')
+            amount_paid = Decimal(paystack_data.get('amount', 0)) / 100
+            
+            # Update transaction
+            transaction.status = 'COMPLETED' if status_val == 'success' else 'FAILED'
+            transaction.response_data = verification_result['data']
+            transaction.save()
+            
+            return Response({
+                'id': transaction.id,
+                'status': transaction.status,
+                'amount': str(transaction.amount),
+                'amount_paid': str(amount_paid),
+                'paystack_status': status_val,
+                'verified': True
+            })
+        else:
+            return Response({
+                'error': 'Failed to verify with Paystack',
+                'details': verification_result.get('error')
+            }, status=400)
+
+
+class QueryMpesaTransactionStatusView(APIView):
+    """
+    Manual query endpoint for M-Pesa transaction status
+    """
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request):
+        checkout_request_id = request.data.get('checkout_request_id')
+        
+        if not checkout_request_id:
+            return Response(
+                {'error': 'checkout_request_id is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            transaction = Transaction.objects.get(mpesa_checkout_request_id=checkout_request_id)
+        except Transaction.DoesNotExist:
+            return Response({'error': 'Transaction not found'}, status=404)
+
+        if not request.user.is_superuser and transaction.initiated_by != request.user:
+            return Response({'error': 'Permission denied'}, status=403)
+
+        # Query Daraja for transaction status
+        query_result = query_daraja_transaction_status(checkout_request_id)
+        
+        if query_result.get('success'):
+            result_data = query_result['data']
+            result_code = result_data.get('ResultCode')
+            
+            # Update transaction based on result
+            if result_code == 0:
+                transaction.status = 'COMPLETED'
+            elif result_code == 1032:
+                transaction.status = 'CANCELLED'
+            elif result_code == 1037:
+                transaction.status = 'TIMEOUT'
+            else:
+                transaction.status = 'FAILED'
+            
+            transaction.response_data = result_data
+            transaction.save()
+            
+            return Response({
+                'id': transaction.id,
+                'status': transaction.status,
+                'result_code': result_code,
+                'result_desc': result_data.get('ResultDesc'),
+                'queried': True
+            })
+        else:
+            return Response({
+                'error': 'Failed to query transaction status',
+                'details': query_result.get('error')
+            }, status=400)
 
 
 # ========================
@@ -252,88 +355,146 @@ class VerifyPaystackTransactionView(APIView):
 @csrf_exempt
 @require_http_methods(["POST"])
 def daraja_webhook(request):
+    """
+    Handle M-Pesa STK Push callback from Safaricom.
+    Must return plain-text 'OK' with HTTP 200.
+    """
     logger.info("Received Daraja webhook")
+    
     try:
         payload = json.loads(request.body)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        logger.warning("Invalid JSON in Daraja webhook")
-        return HttpResponse(status=400)
+        logger.debug(f"Daraja webhook payload: {payload}")
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        logger.warning(f"Invalid JSON in Daraja webhook: {e}")
+        return HttpResponse("OK", status=200)  # ✅ Always return 200
 
     body = payload.get('Body', {})
     stk_callback = body.get('stkCallback', {})
     checkout_request_id = stk_callback.get('CheckoutRequestID')
     result_code = stk_callback.get('ResultCode')
+    result_desc = stk_callback.get('ResultDesc', '')
 
     if not checkout_request_id:
         logger.warning("Missing CheckoutRequestID in Daraja webhook")
-        return HttpResponse(status=400)
+        return HttpResponse("OK", status=200)  # ✅ Always return 200
 
     try:
         transaction = Transaction.objects.get(mpesa_checkout_request_id=checkout_request_id)
     except Transaction.DoesNotExist:
         logger.warning(f"Transaction not found for CheckoutRequestID: {checkout_request_id}")
-        return HttpResponse(status=404)
+        return HttpResponse("OK", status=200)  # ✅ Always return 200
 
-    transaction.status = 'COMPLETED' if result_code == 0 else 'FAILED'
+    # Map result codes to statuses (more detailed than before)
+    if result_code == 0:
+        transaction.status = 'COMPLETED'
+    elif result_code == 1032:
+        transaction.status = 'CANCELLED'
+    elif result_code == 1037:
+        transaction.status = 'TIMEOUT'
+    else:
+        transaction.status = 'FAILED'
+
+    # ✅ Save full callback payload for debugging/auditing
+    transaction.response_data = payload
     transaction.save()
-    logger.info(f"Daraja webhook processed: {transaction.id} -> {transaction.status}")
-    return HttpResponse("OK")
+    
+    logger.info(f"Daraja webhook processed: {transaction.id} -> {transaction.status} (Code: {result_code})")
+    
+    # ✅ Generate receipt if payment is successful (optional - uncomment if you have receipt system)
+    # if transaction.status == 'COMPLETED':
+    #     try:
+    #         from receipts.models import Receipt
+    #         if not Receipt.objects.filter(transaction=transaction).exists():
+    #             from receipts.services import ReceiptGenerator
+    #             ReceiptGenerator.generate_receipt(transaction)
+    #     except Exception as e:
+    #         logger.error(f"Failed to generate receipt: {e}")
+    
+    return HttpResponse("OK", status=200)  # ✅ Always return 200
 
 
 @csrf_exempt
 @require_http_methods(["POST"])
 def paystack_webhook(request):
+    """
+    Handle Paystack webhook events.
+    Must always return HTTP 200 to acknowledge receipt.
+    """
     logger.info("Received Paystack webhook")
     
-    secret = getattr(settings, 'PAYSTACK_SECRET_KEY', None)
+    # ✅ Use PAYSTACK_WEBHOOK_SECRET, not PAYSTACK_SECRET_KEY
+    secret = getattr(settings, 'PAYSTACK_WEBHOOK_SECRET', None)
     if not secret:
-        logger.error("PAYSTACK_SECRET_KEY not set")
-        return HttpResponse(status=500)
+        logger.error("PAYSTACK_WEBHOOK_SECRET not set in settings")
+        return HttpResponse(status=200)  # ✅ Always return 200
 
     signature = request.headers.get('x-paystack-signature')
     if not signature:
         logger.warning("Missing Paystack signature")
-        return HttpResponse(status=400)
+        return HttpResponse(status=200)  # ✅ Always return 200
 
+    # ✅ Verify signature using hmac and hashlib (now imported)
     computed_signature = hmac.new(
         secret.encode('utf-8'),
         request.body,
         hashlib.sha512
     ).hexdigest()
 
-    if signature != computed_signature:
-        logger.warning("Invalid Paystack signature")
-        return HttpResponse(status=400)
+    if not hmac.compare_digest(signature, computed_signature):
+        logger.warning("Invalid Paystack signature - possible tampering")
+        return HttpResponse(status=200)  # ✅ Always return 200
 
     try:
         event = json.loads(request.body)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        logger.warning("Invalid JSON in Paystack webhook")
-        return HttpResponse(status=400)
+        logger.debug(f"Paystack webhook event: {event}")
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        logger.warning(f"Invalid JSON in Paystack webhook: {e}")
+        return HttpResponse(status=200)  # ✅ Always return 200
 
-    if event.get('event') != 'charge.success':
-        return HttpResponse("Ignored non-success event", status=200)
+    event_type = event.get('event')
+    
+    # ✅ Handle both charge.success AND charge.failed
+    if event_type not in ['charge.success', 'charge.failed']:
+        logger.info(f"Ignored non-relevant Paystack event: {event_type}")
+        return HttpResponse(status=200)  # ✅ Always return 200
 
     data = event.get('data', {})
     reference = data.get('reference')
     amount_kobo = data.get('amount')
     status_val = data.get('status')
 
-    if not reference or not amount_kobo:
-        logger.warning("Missing reference or amount in Paystack webhook")
-        return HttpResponse(status=400)
+    if not reference:
+        logger.warning("Missing reference in Paystack webhook")
+        return HttpResponse(status=200)  # ✅ Always return 200
 
     try:
         transaction = Transaction.objects.get(paystack_reference=reference)
     except Transaction.DoesNotExist:
         logger.warning(f"Paystack transaction not found: {reference}")
-        return HttpResponse(status=404)
+        return HttpResponse(status=200)  # ✅ Always return 200
 
-    amount_paid = Decimal(amount_kobo) / 100
-    if abs(transaction.amount - amount_paid) > Decimal('0.01'):
-        logger.warning(f"Amount mismatch: expected {transaction.amount}, got {amount_paid}")
-
-    transaction.status = 'COMPLETED' if status_val == 'success' else 'FAILED'
+    # Update status based on event type
+    if event_type == 'charge.success' and status_val == 'success':
+        transaction.status = 'COMPLETED'
+        logger.info(f"Paystack payment successful: {transaction.id}")
+        
+        # ✅ Generate receipt if payment is successful (optional)
+        # try:
+        #     from receipts.models import Receipt
+        #     if not Receipt.objects.filter(transaction=transaction).exists():
+        #         from receipts.services import ReceiptGenerator
+        #         ReceiptGenerator.generate_receipt(transaction)
+        # except Exception as e:
+        #     logger.error(f"Failed to generate receipt: {e}")
+            
+    elif event_type == 'charge.failed':
+        transaction.status = 'FAILED'
+        logger.info(f"Paystack payment failed: {transaction.id}")
+    
+    # ✅ Save full webhook payload for debugging/auditing
+    transaction.response_data = event
     transaction.save()
+    
     logger.info(f"Paystack webhook processed: {transaction.id} -> {transaction.status}")
-    return HttpResponse("OK")
+    
+    return HttpResponse(status=200)  # ✅ Always return 200

@@ -8,18 +8,16 @@ from django.conf import settings
 from django.http import HttpResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
-from django.views.decorators.http import require_http_methods
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.permissions import IsAuthenticated
 from .models import Transaction
 from .utils import (
     send_stk_push,
     initialize_paystack_transaction,
     normalize_phone_number,
-    verify_paystack_transaction,
-    query_daraja_transaction_status
+    verify_paystack_transaction
 )
 from django.db.models import Sum
 from datetime import datetime, timedelta
@@ -284,90 +282,6 @@ class VerifyPaystackTransactionView(APIView):
                 'error': 'Failed to verify with Paystack',
                 'details': verification_result.get('error')
             }, status=400)
-
-
-class QueryMpesaTransactionStatusView(APIView):
-    """
-    Manual query endpoint for M-Pesa transaction status
-    """
-    permission_classes = [IsAuthenticated]
-    
-    def post(self, request):
-        checkout_request_id = request.data.get('checkout_request_id')
-        
-        if not checkout_request_id:
-            return Response(
-                {'error': 'checkout_request_id is required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        try:
-            transaction = Transaction.objects.get(mpesa_checkout_request_id=checkout_request_id)
-        except Transaction.DoesNotExist:
-            return Response(
-                {'error': 'Transaction not found'}, 
-                status=status.HTTP_404_NOT_FOUND
-            )
-
-        if not request.user.is_superuser and transaction.initiated_by != request.user:
-            return Response(
-                {'error': 'Permission denied'}, 
-                status=status.HTTP_403_FORBIDDEN
-            )
-
-        try:
-            # Query Daraja for transaction status
-            query_result = query_daraja_transaction_status(checkout_request_id)
-            
-            if not query_result.get('success'):
-                # Safaricom hasn't processed it yet or network error → still pending
-                return Response({
-                    'id': transaction.id,
-                    'status': 'PENDING',
-                    'message': 'Transaction still processing',
-                    'queried': True
-                })
-
-            result_data = query_result['data']
-            result_code = result_data.get('ResultCode')
-            
-            # Determine status based on ResultCode
-            if result_code is None:
-                # Safaricom hasn't assigned a result code yet
-                transaction_status = 'PENDING'
-            elif result_code == 0:
-                transaction_status = 'COMPLETED'
-            elif result_code == 1032:
-                transaction_status = 'CANCELLED'
-            elif result_code == 1037:
-                transaction_status = 'TIMEOUT'
-            else:
-                transaction_status = 'FAILED'
-
-            # Only update transaction if moving from PENDING to terminal state
-            if transaction.status == 'PENDING' and transaction_status != 'PENDING':
-                transaction.status = transaction_status
-                transaction.response_data = result_data
-                transaction.save()
-            
-            return Response({
-                'id': transaction.id,
-                'status': transaction_status,
-                'result_code': result_code,
-                'result_desc': result_data.get('ResultDesc'),
-                'queried': True
-            })
-            
-        except Exception as e:
-            logger.error(f"Error querying MPesa status: {str(e)}")
-            # Even on exception, return PENDING (don't fail the poll)
-            return Response({
-                'id': transaction.id,
-                'status': 'PENDING',
-                'error': str(e),
-                'message': 'Temporary error - continuing to poll',
-                'queried': False
-            })
 
 
 @csrf_exempt

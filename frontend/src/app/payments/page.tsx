@@ -62,13 +62,13 @@ export default function PaymentsPage() {
   const [pollingStatus, setPollingStatus] = useState<TransactionStatus | null>(null);
   const [showConfirmation, setShowConfirmation] = useState(false);
   const [showFailure, setShowFailure] = useState(false);
-  const [pollStartTime, setPollStartTime] = useState<number | null>(null); // ✅ Added for timeout
+  const [pollStartTime, setPollStartTime] = useState<number | null>(null);
 
   const isMpesa = paymentMethod === 'STK_PUSH';
   const MAX_POLL_TIME = 60000; // 60 seconds max for MPesa
   const POLL_INTERVAL = 3000;  // Poll every 3 seconds
 
-  // 🔁 POLLING FOR ACTIVE TRANSACTION
+  // 🔁 POLLING FOR ACTIVE TRANSACTION (Webhook-only approach)
   useEffect(() => {
     if (!activeTransactionId) return;
 
@@ -87,89 +87,39 @@ export default function PaymentsPage() {
           }
         }
 
-        if (paymentMethod === 'PAYSTACK') {
-          // Paystack: poll transaction detail (status updated by webhook)
-          const res = await fetch(api.transactions.detail(activeTransactionId), {
-            credentials: 'include',
-          });
+        // ✅ ONLY poll your own transaction detail endpoint (webhook updates this)
+        const res = await fetch(api.transactions.detail(activeTransactionId), {
+          credentials: 'include',
+        });
 
-          if (!res.ok) {
-            console.error('Failed to fetch transaction status');
-            return;
-          }
-
-          const transactionData: TransactionResponse = await res.json();
-          setPollingStatus(transactionData.status);
-
-          if (transactionData.status === 'COMPLETED') {
-            setShowConfirmation(true);
-            setActiveTransactionId(null);
-          } else if (['FAILED', 'CANCELLED'].includes(transactionData.status)) {
-            setShowFailure(true);
-            setActiveTransactionId(null);
-          }
-        } else if (paymentMethod === 'STK_PUSH') {
-          // MPesa: get transaction details first to get checkout_request_id
-          const detailRes = await fetch(api.transactions.detail(activeTransactionId), {
-            credentials: 'include',
-          });
-          
-          if (!detailRes.ok) {
-            console.error('Failed to fetch transaction details');
-            return;
-          }
-
-          const transactionData: TransactionResponse = await detailRes.json();
-          const checkoutRequestId = transactionData.mpesa_checkout_request_id;
-
-          if (!checkoutRequestId) {
-            console.error('No checkout request ID found for MPesa transaction');
-            return;
-          }
-
-          // Query Safaricom directly for real-time status
-          const queryRes = await fetch(api.transactions.queryMpesa, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'X-CSRFToken': getCSRFToken() || '',
-            },
-            credentials: 'include',
-            body: JSON.stringify({ checkout_request_id: checkoutRequestId }),
-          });
-
-          if (!queryRes.ok) {
-            console.error('Failed to query MPesa status - continuing to poll');
-            // ✅ Don't exit - continue polling on network errors
-            return;
-          }
-
-          const queryData = await queryRes.json();
-          const currentStatus = queryData.status;
-
-          setPollingStatus(currentStatus);
-
-          // ✅ Only stop polling on terminal states
-          if (currentStatus === 'COMPLETED') {
-            setShowConfirmation(true);
-            setActiveTransactionId(null);
-            setPollStartTime(null);
-          } else if (['FAILED', 'CANCELLED', 'TIMEOUT'].includes(currentStatus)) {
-            setShowFailure(true);
-            setActiveTransactionId(null);
-            setPollStartTime(null);
-          }
-          // 🔄 If status is PENDING or any other non-terminal state, continue polling
+        if (!res.ok) {
+          console.error('Failed to fetch transaction status');
+          return;
         }
+
+        const transactionData: TransactionResponse = await res.json();
+        setPollingStatus(transactionData.status);
+
+        // Stop polling only on terminal states
+        if (transactionData.status === 'COMPLETED') {
+          setShowConfirmation(true);
+          setActiveTransactionId(null);
+          setPollStartTime(null);
+        } else if (['FAILED', 'CANCELLED', 'TIMEOUT'].includes(transactionData.status)) {
+          setShowFailure(true);
+          setActiveTransactionId(null);
+          setPollStartTime(null);
+        }
+        // Continue polling if status is still PENDING
       } catch (err) {
         console.error('Polling error:', err);
-        // ✅ Continue polling even on errors
+        // Continue polling on errors
       }
     };
 
     // Initial poll immediately
     pollStatus();
-    // Then poll every 3 seconds
+    // Poll every 3 seconds
     pollInterval = setInterval(pollStatus, POLL_INTERVAL);
     
     return () => {
@@ -239,7 +189,7 @@ export default function PaymentsPage() {
     };
 
     verifyPayment();
-  }, [router]); // Only depend on router
+  }, [router]);
 
   const validateInputs = () => {
     setError(null);
@@ -301,7 +251,7 @@ export default function PaymentsPage() {
           window.location.href = data.checkout_url;
         } else if (data.id) {
           setActiveTransactionId(data.id);
-          setPollStartTime(Date.now()); // ✅ Record start time for MPesa
+          setPollStartTime(Date.now());
           setSuccessMessage('Payment request sent! Please check your phone to complete.');
           setAmount('');
           setIdentifier('');
@@ -451,18 +401,18 @@ export default function PaymentsPage() {
             </div>
           )}
 
-          {/* Polling Status Indicator (for MPesa) */}
+          {/* Polling Status Indicator */}
           {activeTransactionId && pollingStatus !== 'PROCESSING' && (
             <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-xl flex items-center gap-3 animate-fade-in">
               <Loader2 className="w-5 h-5 animate-spin text-blue-600" />
               <span className="text-blue-800">
                 {isMpesa 
-                  ? 'Checking with MPesa... Do not close this page' 
+                  ? 'Awaiting MPesa confirmation... Do not close this page' 
                   : 'Awaiting payment confirmation...'}
                 <br />
                 <span className="text-xs text-blue-600">
                   {isMpesa 
-                    ? 'We\'ll keep checking for up to 60 seconds' 
+                    ? 'We\'ll update you as soon as Safaricom confirms' 
                     : 'We\'ll update you as soon as it\'s confirmed'}
                 </span>
               </span>

@@ -1,7 +1,7 @@
 import logging
 import json
-import hmac  # ✅ ADDED
-import hashlib  # ✅ ADDED
+import hmac
+import hashlib
 from decimal import Decimal
 from uuid import uuid4
 from django.conf import settings
@@ -19,7 +19,7 @@ from .utils import (
     initialize_paystack_transaction,
     normalize_phone_number,
     verify_paystack_transaction,
-    query_daraja_transaction_status  # ✅ ADDED
+    query_daraja_transaction_status
 )
 from django.db.models import Sum
 from datetime import datetime, timedelta
@@ -249,9 +249,6 @@ class InitiatePaymentView(APIView):
 
 
 class VerifyPaystackTransactionView(APIView):
-    """
-    Manual verification endpoint - calls Paystack API to check transaction status
-    """
     permission_classes = [IsAuthenticated]
     
     def get(self, request, reference):
@@ -263,7 +260,6 @@ class VerifyPaystackTransactionView(APIView):
         if not request.user.is_superuser and transaction.initiated_by != request.user:
             return Response({'error': 'Permission denied'}, status=403)
 
-        # Call Paystack API to verify
         verification_result = verify_paystack_transaction(reference)
         
         if verification_result.get('success'):
@@ -271,7 +267,6 @@ class VerifyPaystackTransactionView(APIView):
             status_val = paystack_data.get('status')
             amount_paid = Decimal(paystack_data.get('amount', 0)) / 100
             
-            # Update transaction
             transaction.status = 'COMPLETED' if status_val == 'success' else 'FAILED'
             transaction.response_data = verification_result['data']
             transaction.save()
@@ -309,54 +304,74 @@ class QueryMpesaTransactionStatusView(APIView):
         try:
             transaction = Transaction.objects.get(mpesa_checkout_request_id=checkout_request_id)
         except Transaction.DoesNotExist:
-            return Response({'error': 'Transaction not found'}, status=404)
+            return Response(
+                {'error': 'Transaction not found'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
 
         if not request.user.is_superuser and transaction.initiated_by != request.user:
-            return Response({'error': 'Permission denied'}, status=403)
+            return Response(
+                {'error': 'Permission denied'}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
 
-        # Query Daraja for transaction status
-        query_result = query_daraja_transaction_status(checkout_request_id)
-        
-        if query_result.get('success'):
+        try:
+            # Query Daraja for transaction status
+            query_result = query_daraja_transaction_status(checkout_request_id)
+            
+            if not query_result.get('success'):
+                # Safaricom hasn't processed it yet or network error → still pending
+                return Response({
+                    'id': transaction.id,
+                    'status': 'PENDING',
+                    'message': 'Transaction still processing',
+                    'queried': True
+                })
+
             result_data = query_result['data']
             result_code = result_data.get('ResultCode')
             
-            # Update transaction based on result
+            # Determine status based on ResultCode
             if result_code is None:
-                transaction.status = 'PENDING'
-            elif result_code == 1032:
-                transaction.status = 'CANCELLED'
+                # Safaricom hasn't assigned a result code yet
+                transaction_status = 'PENDING'
             elif result_code == 0:
-                transaction.status = 'COMPLETED'
+                transaction_status = 'COMPLETED'
+            elif result_code == 1032:
+                transaction_status = 'CANCELLED'
             elif result_code == 1037:
-                transaction.status = 'TIMEOUT'
+                transaction_status = 'TIMEOUT'
             else:
-                transaction.status = 'FAILED'
-        else:
-            transaction.status = 'PENDING'
-            
-            transaction.response_data = result_data
-            transaction.save()
+                transaction_status = 'FAILED'
+
+            # Only update transaction if moving from PENDING to terminal state
+            if transaction.status == 'PENDING' and transaction_status != 'PENDING':
+                transaction.status = transaction_status
+                transaction.response_data = result_data
+                transaction.save()
             
             return Response({
                 'id': transaction.id,
-                'status': transaction.status,
+                'status': transaction_status,
                 'result_code': result_code,
                 'result_desc': result_data.get('ResultDesc'),
                 'queried': True
             })
+            
+        except Exception as e:
+            logger.error(f"Error querying MPesa status: {str(e)}")
+            # Even on exception, return PENDING (don't fail the poll)
+            return Response({
+                'id': transaction.id,
+                'status': 'PENDING',
+                'error': str(e),
+                'message': 'Temporary error - continuing to poll',
+                'queried': False
+            })
 
-
-# ========================
-# WEBHOOK VIEWS (FUNCTION-BASED, CSRF-EXEMPT)
-# ========================
 
 @csrf_exempt
 def daraja_webhook(request):
-    """
-    Handle M-Pesa STK Push callback from Safaricom.
-    Must return plain-text 'OK' with HTTP 200.
-    """
     if request.method == 'GET':
         logger.info("Daraja webhook health check (GET)")
         return HttpResponse("OK", status=200)
@@ -371,7 +386,7 @@ def daraja_webhook(request):
         logger.debug(f"Daraja webhook payload: {payload}")
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         logger.warning(f"Invalid JSON in Daraja webhook: {e}")
-        return HttpResponse("OK", status=200)  # ✅ Always return 200
+        return HttpResponse("OK", status=200)
 
     body = payload.get('Body', {})
     stk_callback = body.get('stkCallback', {})
@@ -381,15 +396,14 @@ def daraja_webhook(request):
 
     if not checkout_request_id:
         logger.warning("Missing CheckoutRequestID in Daraja webhook")
-        return HttpResponse("OK", status=200)  # ✅ Always return 200
+        return HttpResponse("OK", status=200)
 
     try:
         transaction = Transaction.objects.get(mpesa_checkout_request_id=checkout_request_id)
     except Transaction.DoesNotExist:
         logger.warning(f"Transaction not found for CheckoutRequestID: {checkout_request_id}")
-        return HttpResponse("OK", status=200)  # ✅ Always return 200
+        return HttpResponse("OK", status=200)
 
-    # Map result codes to statuses (more detailed than before)
     if result_code == 0:
         transaction.status = 'COMPLETED'
     elif result_code == 1032:
@@ -399,31 +413,16 @@ def daraja_webhook(request):
     else:
         transaction.status = 'FAILED'
 
-    # ✅ Save full callback payload for debugging/auditing
     transaction.response_data = payload
     transaction.save()
     
     logger.info(f"Daraja webhook processed: {transaction.id} -> {transaction.status} (Code: {result_code})")
     
-    # ✅ Generate receipt if payment is successful (optional - uncomment if you have receipt system)
-    # if transaction.status == 'COMPLETED':
-    #     try:
-    #         from receipts.models import Receipt
-    #         if not Receipt.objects.filter(transaction=transaction).exists():
-    #             from receipts.services import ReceiptGenerator
-    #             ReceiptGenerator.generate_receipt(transaction)
-    #     except Exception as e:
-    #         logger.error(f"Failed to generate receipt: {e}")
-    
-    return HttpResponse("OK", status=200)  # ✅ Always return 200
+    return HttpResponse("OK", status=200)
 
 
 @csrf_exempt
 def paystack_webhook(request):
-    """
-    Handle Paystack webhook events.
-    Must always return HTTP 200 to acknowledge receipt.
-    """
     if request.method == 'GET':
         logger.info("Paystack webhook health check (GET)")
         return HttpResponse(status=200)
@@ -433,18 +432,16 @@ def paystack_webhook(request):
     
     logger.info("Received Paystack webhook")
     
-    # ✅ Use PAYSTACK_WEBHOOK_SECRET, not PAYSTACK_SECRET_KEY
     secret = getattr(settings, 'PAYSTACK_WEBHOOK_SECRET', None)
     if not secret:
         logger.error("PAYSTACK_WEBHOOK_SECRET not set in settings")
-        return HttpResponse(status=200)  # ✅ Always return 200
+        return HttpResponse(status=200)
 
     signature = request.headers.get('x-paystack-signature')
     if not signature:
         logger.warning("Missing Paystack signature")
-        return HttpResponse(status=200)  # ✅ Always return 200
+        return HttpResponse(status=200)
 
-    # ✅ Verify signature using hmac and hashlib (now imported)
     computed_signature = hmac.new(
         secret.encode('utf-8'),
         request.body,
@@ -453,21 +450,20 @@ def paystack_webhook(request):
 
     if not hmac.compare_digest(signature, computed_signature):
         logger.warning("Invalid Paystack signature - possible tampering")
-        return HttpResponse(status=200)  # ✅ Always return 200
+        return HttpResponse(status=200)
 
     try:
         event = json.loads(request.body)
         logger.debug(f"Paystack webhook event: {event}")
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         logger.warning(f"Invalid JSON in Paystack webhook: {e}")
-        return HttpResponse(status=200)  # ✅ Always return 200
+        return HttpResponse(status=200)
 
     event_type = event.get('event')
     
-    # ✅ Handle both charge.success AND charge.failed
     if event_type not in ['charge.success', 'charge.failed']:
         logger.info(f"Ignored non-relevant Paystack event: {event_type}")
-        return HttpResponse(status=200)  # ✅ Always return 200
+        return HttpResponse(status=200)
 
     data = event.get('data', {})
     reference = data.get('reference')
@@ -476,36 +472,25 @@ def paystack_webhook(request):
 
     if not reference:
         logger.warning("Missing reference in Paystack webhook")
-        return HttpResponse(status=200)  # ✅ Always return 200
+        return HttpResponse(status=200)
 
     try:
         transaction = Transaction.objects.get(paystack_reference=reference)
     except Transaction.DoesNotExist:
         logger.warning(f"Paystack transaction not found: {reference}")
-        return HttpResponse(status=200)  # ✅ Always return 200
+        return HttpResponse(status=200)
 
-    # Update status based on event type
     if event_type == 'charge.success' and status_val == 'success':
         transaction.status = 'COMPLETED'
         logger.info(f"Paystack payment successful: {transaction.id}")
-        
-        # ✅ Generate receipt if payment is successful (optional)
-        # try:
-        #     from receipts.models import Receipt
-        #     if not Receipt.objects.filter(transaction=transaction).exists():
-        #         from receipts.services import ReceiptGenerator
-        #         ReceiptGenerator.generate_receipt(transaction)
-        # except Exception as e:
-        #     logger.error(f"Failed to generate receipt: {e}")
             
     elif event_type == 'charge.failed':
         transaction.status = 'FAILED'
         logger.info(f"Paystack payment failed: {transaction.id}")
     
-    # ✅ Save full webhook payload for debugging/auditing
     transaction.response_data = event
     transaction.save()
     
     logger.info(f"Paystack webhook processed: {transaction.id} -> {transaction.status}")
     
-    return HttpResponse(status=200)  # ✅ Always return 200
+    return HttpResponse(status=200)

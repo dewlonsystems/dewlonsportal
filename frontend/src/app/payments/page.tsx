@@ -25,7 +25,7 @@ interface TransactionResponse {
   amount: string;
   payment_method: string;
   customer_identifier: string;
-  mpesa_checkout_request_id?: string; // ✅ Added for MPesa polling
+  mpesa_checkout_request_id?: string;
 }
 
 const getCSRFToken = (): string | null => {
@@ -62,8 +62,11 @@ export default function PaymentsPage() {
   const [pollingStatus, setPollingStatus] = useState<TransactionStatus | null>(null);
   const [showConfirmation, setShowConfirmation] = useState(false);
   const [showFailure, setShowFailure] = useState(false);
+  const [pollStartTime, setPollStartTime] = useState<number | null>(null); // ✅ Added for timeout
 
   const isMpesa = paymentMethod === 'STK_PUSH';
+  const MAX_POLL_TIME = 60000; // 60 seconds max for MPesa
+  const POLL_INTERVAL = 3000;  // Poll every 3 seconds
 
   // 🔁 POLLING FOR ACTIVE TRANSACTION
   useEffect(() => {
@@ -73,6 +76,17 @@ export default function PaymentsPage() {
 
     const pollStatus = async () => {
       try {
+        // Handle timeout for MPesa
+        if (isMpesa && pollStartTime) {
+          const now = Date.now();
+          if (now - pollStartTime > MAX_POLL_TIME) {
+            setError('Payment is taking longer than expected. Please check your MPesa SMS for confirmation.');
+            setActiveTransactionId(null);
+            setPollStartTime(null);
+            return;
+          }
+        }
+
         if (paymentMethod === 'PAYSTACK') {
           // Paystack: poll transaction detail (status updated by webhook)
           const res = await fetch(api.transactions.detail(activeTransactionId), {
@@ -125,35 +139,43 @@ export default function PaymentsPage() {
           });
 
           if (!queryRes.ok) {
-            console.error('Failed to query MPesa status');
+            console.error('Failed to query MPesa status - continuing to poll');
+            // ✅ Don't exit - continue polling on network errors
             return;
           }
 
           const queryData = await queryRes.json();
-          setPollingStatus(queryData.status);
+          const currentStatus = queryData.status;
 
-          if (queryData.status === 'COMPLETED') {
+          setPollingStatus(currentStatus);
+
+          // ✅ Only stop polling on terminal states
+          if (currentStatus === 'COMPLETED') {
             setShowConfirmation(true);
             setActiveTransactionId(null);
-          } else if (['FAILED', 'CANCELLED', 'TIMEOUT'].includes(queryData.status)) {
+            setPollStartTime(null);
+          } else if (['FAILED', 'CANCELLED', 'TIMEOUT'].includes(currentStatus)) {
             setShowFailure(true);
             setActiveTransactionId(null);
+            setPollStartTime(null);
           }
+          // 🔄 If status is PENDING or any other non-terminal state, continue polling
         }
       } catch (err) {
         console.error('Polling error:', err);
+        // ✅ Continue polling even on errors
       }
     };
 
     // Initial poll immediately
     pollStatus();
     // Then poll every 3 seconds
-    pollInterval = setInterval(pollStatus, 3000);
+    pollInterval = setInterval(pollStatus, POLL_INTERVAL);
     
     return () => {
       if (pollInterval) clearInterval(pollInterval);
     };
-  }, [activeTransactionId, paymentMethod]);
+  }, [activeTransactionId, paymentMethod, pollStartTime]);
 
   // ✅ HANDLE PAYSTACK RETURN — using window.location (safe for build)
   useEffect(() => {
@@ -279,6 +301,7 @@ export default function PaymentsPage() {
           window.location.href = data.checkout_url;
         } else if (data.id) {
           setActiveTransactionId(data.id);
+          setPollStartTime(Date.now()); // ✅ Record start time for MPesa
           setSuccessMessage('Payment request sent! Please check your phone to complete.');
           setAmount('');
           setIdentifier('');
@@ -437,7 +460,11 @@ export default function PaymentsPage() {
                   ? 'Checking with MPesa... Do not close this page' 
                   : 'Awaiting payment confirmation...'}
                 <br />
-                <span className="text-xs text-blue-600">We\'ll update you as soon as it\'s confirmed</span>
+                <span className="text-xs text-blue-600">
+                  {isMpesa 
+                    ? 'We\'ll keep checking for up to 60 seconds' 
+                    : 'We\'ll update you as soon as it\'s confirmed'}
+                </span>
               </span>
             </div>
           )}

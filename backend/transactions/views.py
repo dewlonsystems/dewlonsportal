@@ -326,6 +326,8 @@ class QueryMpesaTransactionStatusView(APIView):
                 transaction.status = 'COMPLETED'
             elif result_code == 1032:
                 transaction.status = 'CANCELLED'
+            elif result_code is None:
+                transaction.status = 'PENDING'
             elif result_code == 1037:
                 transaction.status = 'TIMEOUT'
             else:

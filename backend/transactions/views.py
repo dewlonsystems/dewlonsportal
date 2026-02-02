@@ -322,16 +322,18 @@ class QueryMpesaTransactionStatusView(APIView):
             result_code = result_data.get('ResultCode')
             
             # Update transaction based on result
-            if result_code == 0:
-                transaction.status = 'COMPLETED'
+            if result_code is None:
+                transaction.status = 'PENDING'
             elif result_code == 1032:
                 transaction.status = 'CANCELLED'
-            elif result_code is None:
-                transaction.status = 'PENDING'
+            elif result_code == 0:
+                transaction.status = 'COMPLETED'
             elif result_code == 1037:
                 transaction.status = 'TIMEOUT'
             else:
                 transaction.status = 'FAILED'
+        else:
+            transaction.status = 'PENDING'
             
             transaction.response_data = result_data
             transaction.save()
@@ -343,11 +345,6 @@ class QueryMpesaTransactionStatusView(APIView):
                 'result_desc': result_data.get('ResultDesc'),
                 'queried': True
             })
-        else:
-            return Response({
-                'error': 'Failed to query transaction status',
-                'details': query_result.get('error')
-            }, status=400)
 
 
 # ========================
